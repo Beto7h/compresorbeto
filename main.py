@@ -27,11 +27,17 @@ DEFAULT_SETTINGS = {
 }
 
 # --- 🛠️ UTILIDADES DE SISTEMA ---
-def get_sys_stats():
+def get_sys_stats_raw():
     cpu = psutil.cpu_percent()
     ram = psutil.virtual_memory().percent
-    total, used, free = shutil.disk_usage(".")
-    return f"🖥️ **CPU:** {cpu}% | 🧠 **RAM:** {ram}% | 💽 **Libre:** {free // (2**30)}GB"
+    _, _, free = shutil.disk_usage(".")
+    disk_gb = free // (1024**3)
+    return f"⚙️ CPU: `{cpu}%` | 🧠 RAM: `{ram}%` | 💽 Disco: `{disk_gb}GB`"
+
+def get_eta(current, total, speed):
+    if speed <= 0: return "calculando..."
+    remaining_time = (total - current) / speed
+    return time.strftime('%H:%M:%S', time.gmtime(remaining_time))
 
 def cleanup(uid):
     shutil.rmtree(Config.DOWNLOAD_PATH, ignore_errors=True)
@@ -62,21 +68,27 @@ def get_main_menu(uid):
     ])
 
 # --- 📊 BARRAS DE PROGRESO ---
+
 async def progress_bar(current, total, status_msg, start_time, action):
     uid = status_msg.chat.id
     if uid in cancel_flags:
         raise Exception("USER_ABORTED")
+    
     now = time.time()
     diff = now - start_time
     if round(diff % 4.00) == 0 or current == total:
         percentage = current * 100 / total
         speed = current / diff if diff > 0 else 0
-        bar_len = 12
-        filled = int(bar_len * current // total)
-        bar = '█' * filled + '░' * (bar_len - filled)
-        tmp = (f"📥 **{action}**\n« {bar} »  **{percentage:.1f}%**\n\n"
-               f"📊 **DATOS:** `{current / (1024**2):.1f}` / `{total / (1024**2):.1f}` MB\n"
-               f"🚀 **VEL:** `{speed / (1024**2):.2f}` MB/s")
+        eta = get_eta(current, total, speed)
+        
+        bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
+        
+        tmp = (f"📤 **{action}**\n"
+               f"« {bar} »  **{percentage:.1f}%**\n\n"
+               f"📊 **DATOS:** `{current/(1024**2):.1f}` / `{total/(1024**2):.1f}` MB\n"
+               f"🚀 **VEL:** `{speed/(1024**2):.2f}` MB/s | ⏳ **ETA:** `{eta}`\n\n"
+               f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
+        
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]])
         try: await status_msg.edit(tmp, reply_markup=kb)
         except: pass
@@ -89,34 +101,49 @@ async def compression_monitor(uid, msg, path, output_name, settings):
     ]
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     active_processes[uid] = proc
+    start_time = time.time()
     last_update = 0
     
     while True:
         line = await proc.stdout.readline()
         if not line: break
         text = line.decode("utf-8")
+        
         if "out_time_ms=" in text:
             try:
                 ms = int(text.split("=")[1])
                 current_time_sec = ms / 1000000
+                
                 if duration > 0 and (time.time() - last_update) > 4:
                     percentage = min((current_time_sec / duration) * 100, 100)
+                    elapsed = time.time() - start_time
+                    speed_factor = current_time_sec / elapsed if elapsed > 0 else 0
+                    remaining_video = duration - current_time_sec
+                    eta_sec = remaining_video / speed_factor if speed_factor > 0 else 0
+                    eta = time.strftime('%H:%M:%S', time.gmtime(eta_sec))
+                    
                     bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
                     curr_f = time.strftime('%H:%M:%S', time.gmtime(current_time_sec))
                     total_f = time.strftime('%H:%M:%S', time.gmtime(duration))
-                    tmp = (f"⚙️ **COMPRIMIENDO VIDEO**\n« {bar} »  **{percentage:.1f}%**\n\n"
+                    
+                    tmp = (f"⚙️ **COMPRIMIENDO VIDEO**\n"
+                           f"« {bar} »  **{percentage:.1f}%**\n\n"
                            f"⏳ **PROGRESO:** `{curr_f}` / `{total_f}`\n"
-                           f"💎 **CALIDAD:** `{settings['q_label']}`")
+                           f"🚀 **VEL:** `{speed_factor:.2f}x` | ⏳ **ETA:** `{eta}`\n\n"
+                           f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
+                    
                     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]])
                     try: await msg.edit(tmp, reply_markup=kb)
                     except: pass
                     last_update = time.time()
             except: pass
+            
         if uid in cancel_flags:
             proc.terminate()
             raise Exception("USER_ABORTED")
     await proc.wait()
 
+# --- ⚙️ LÓGICA DE PROCESAMIENTO ---
 async def split_video(input_file):
     size_mb = os.path.getsize(input_file) / (1024 * 1024)
     if size_mb <= 1950: return [input_file]
@@ -130,7 +157,6 @@ async def split_video(input_file):
         parts.append(out)
     return parts
 
-# --- ⚙️ LÓGICA DE PROCESAMIENTO ---
 async def process_logic(uid, msg, settings):
     orig_msg = settings['orig_msg']
     input_path = os.path.join(Config.DOWNLOAD_PATH, f"input_{uid}")
@@ -138,7 +164,7 @@ async def process_logic(uid, msg, settings):
         if orig_msg.video or orig_msg.document:
             path = await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "DESCARGANDO"))
         else:
-            await msg.edit("🌐 **Descargando link...**")
+            await msg.edit(f"🌐 **Descargando link...**\n\n{get_sys_stats_raw()}")
             subprocess.run(["aria2c", "-x", "16", "-o", f"input_{uid}", orig_msg.text, "-d", Config.DOWNLOAD_PATH])
             path = input_path
 
@@ -167,7 +193,7 @@ async def worker():
 async def start_cmd(client, message):
     uid = message.from_user.id
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
-    await message.reply(f"👋 **¡Hola!**\n{get_sys_stats()}", reply_markup=get_main_menu(uid))
+    await message.reply(f"👋 **¡Hola!**\n\n{get_sys_stats_raw()}", reply_markup=get_main_menu(uid))
 
 @app.on_message(filters.command("update"))
 async def update_cmd(client, message):
@@ -183,14 +209,14 @@ async def handle_input(client, message):
     uid = message.from_user.id
     user_settings[uid] = DEFAULT_SETTINGS.copy()
     user_settings[uid]['orig_msg'] = message
-    await message.reply("🎬 **Video detectado.**", reply_markup=get_main_menu(uid))
+    await message.reply(f"🎬 **Video detectado.**\n\n{get_sys_stats_raw()}", reply_markup=get_main_menu(uid))
 
 @app.on_callback_query()
 async def cb_handler(client, query):
     uid, data = query.from_user.id, query.data
     if data == "run":
         await processing_queue.put((uid, query.message, user_settings[uid]))
-        await query.message.edit("⏳ **En cola...**")
+        await query.message.edit(f"⏳ **En cola...**\n\n{get_sys_stats_raw()}")
     elif data.startswith("abort_"):
         cancel_flags.add(uid)
         proc = active_processes.get(uid)
