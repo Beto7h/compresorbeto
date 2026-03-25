@@ -68,21 +68,46 @@ def generate_thumbnail(video_path, uid):
     return None
 
 # --- 🎮 MENÚS ---
+
+def get_config_summary(uid):
+    s = user_settings.get(uid, DEFAULT_SETTINGS)
+    return (f"📝 **RESUMEN DE CONFIGURACIÓN:**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💎 **Calidad:** `{s['q_label']}` (CRF {s['crf']})\n"
+            f"📏 **Resolución:** `{s['res']}p`\n"
+            f"⚡ **Velocidad:** `{s['v_label']}`\n"
+            f"🎵 **Audio:** `{s['a_label']}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━")
+
 def get_main_menu(uid):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎞️ AJUSTES DE COMPRESIÓN", callback_data="menu_settings")],
+        [InlineKeyboardButton("🚀 INICIAR COMPRESIÓN", callback_data="run_comp")],
+        [InlineKeyboardButton("─── OPCIONES DE AUDIO ───", callback_data="n")],
+        [InlineKeyboardButton("MP3", callback_data="set_aud_libmp3lame_MP3"),
+         InlineKeyboardButton("AAC", callback_data="set_aud_aac_AAC")],
+        [InlineKeyboardButton("⚡ CONVERTIR AUDIO A MP4", callback_data="run_audio_only")]
+    ])
+
+def get_settings_menu(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎞️ AJUSTES DE COMPRESIÓN", callback_data="n")],
+        [InlineKeyboardButton("💎 CALIDAD (CRF)", callback_data="n")],
         [InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Baja' else ''}Baja", callback_data="set_q_30"),
          InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Estándar' else ''}Estándar", callback_data="set_q_24"),
          InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Súper' else ''}Súper", callback_data="set_q_18")],
+        
+        [InlineKeyboardButton("📏 RESOLUCIÓN", callback_data="n")],
         [InlineKeyboardButton(f"{'✅ ' if s.get('res')=='480' else ''}480p", callback_data="set_r_480"),
          InlineKeyboardButton(f"{'✅ ' if s.get('res')=='720' else ''}720p", callback_data="set_r_720"),
          InlineKeyboardButton(f"{'✅ ' if s.get('res')=='1080' else ''}1080p", callback_data="set_r_1080")],
-        [InlineKeyboardButton("🚀 INICIAR COMPRESIÓN", callback_data="run_comp")],
-        [InlineKeyboardButton("🎵 SOLO CONVERTIR AUDIO (MANTENER VIDEO)", callback_data="n")],
-        [InlineKeyboardButton(f"{'✅ ' if s.get('a_label')=='MP3' else ''}MP3", callback_data="set_aud_libmp3lame_MP3"),
-         InlineKeyboardButton(f"{'✅ ' if s.get('a_label')=='AAC' else ''}AAC", callback_data="set_aud_aac_AAC")],
-        [InlineKeyboardButton("⚡ CONVERTIR AUDIO A MP4", callback_data="run_audio_only")]
+
+        [InlineKeyboardButton("⚡ VELOCIDAD DE PROCESO", callback_data="n")],
+        [InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Lento' else ''}Lento", callback_data="set_v_slower_Lento"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Medio' else ''}Medio", callback_data="set_v_medium_Medio"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Ultra' else ''}Ultra", callback_data="set_v_ultrafast_Ultra")],
+        
+        [InlineKeyboardButton("⬅️ VOLVER AL INICIO", callback_data="menu_main")]
     ])
 
 # --- 📊 BARRAS DE PROGRESO ---
@@ -91,7 +116,6 @@ async def progress_bar(current, total, status_msg, start_time, action):
     if uid in cancel_flags: raise Exception("USER_ABORTED")
     now = time.time()
     diff = now - start_time
-    # Actualización estricta cada 4 segundos o al finalizar
     if round(diff % 4.00) == 0 or current == total:
         percentage = current * 100 / total
         speed = current / diff if diff > 0 else 0
@@ -119,7 +143,6 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
             try:
                 ms = int(text.split("=")[1])
                 current_time_sec = ms / 1000000
-                # Ajustado a 4 segundos para evitar spam a Telegram
                 if duration > 0 and (time.time() - last_update) > 4:
                     percentage = min((current_time_sec / duration) * 100, 100)
                     elapsed = time.time() - start_time
@@ -129,7 +152,7 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
                     bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
                     
                     tmp = (f"⚙️ **{mode_label}**\n« {bar} »  **{percentage:.1f}%**\n\n"
-                           f"🎵 **CÓDEC:** `{settings.get('a_label')}` | 🚀 **VEL:** `{speed_factor:.2f}x`\n"
+                           f"⚡ **PRESET:** `{settings['v_label']}` | 🚀 **V-ETA:** `{speed_factor:.2f}x`\n"
                            f"⏳ **RESTANTE:** `{eta}`\n\n"
                            f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
                     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]])
@@ -157,7 +180,6 @@ async def process_logic(uid, msg, settings, mode):
         duration = get_duration(input_path)
 
         if mode == "audio_only":
-            # Agregamos -progress pipe:1 para que el ffmpeg_monitor pueda leer el flujo
             cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "copy", "-c:a", settings['audio_codec'], "-b:a", "192k", "-map", "0", "-progress", "pipe:1", output_path]
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "CONVIRTIENDO AUDIO")
         else:
@@ -169,15 +191,13 @@ async def process_logic(uid, msg, settings, mode):
         await app.send_video(
             chat_id=uid, video=output_path, duration=int(get_duration(output_path)), thumb=thumb,
             progress=progress_bar, progress_args=(msg, time.time(), "SUBIENDO"), 
-            caption=f"✅ **Proceso Completado**\n🎬 Modo: {'Solo Audio' if mode=='audio_only' else 'Compresión'}\n🎵 Audio: {settings['a_label']}"
+            caption=f"✅ **Proceso Completado**\n\n🎬 Modo: {'Solo Audio' if mode=='audio_only' else 'Compresión'}\n⚙️ Preset: `{settings['v_label']}` | 🎵: `{settings['a_label']}`"
         )
         try: await msg.delete()
         except: pass
     except Exception as e:
-        if "USER_ABORTED" in str(e):
-             await msg.edit("❌ **Proceso cancelado por el usuario.**")
-        else:
-             await msg.edit(f"❌ **Error:** `{e}`")
+        if "USER_ABORTED" in str(e): await msg.edit("❌ **Proceso cancelado por el usuario.**")
+        else: await msg.edit(f"❌ **Error:** `{e}`")
     finally:
         active_processes.pop(uid, None)
         if uid in cancel_flags: cancel_flags.remove(uid)
@@ -198,21 +218,26 @@ async def start_cmd(client, message):
 
 @app.on_message(filters.command("reiniciar") & filters.private)
 async def restart_cmd(client, message):
-    await message.reply("🚀 **Reiniciando sistema...**")
+    await message.reply("🚀 **Reiniciando...**")
     await asyncio.sleep(2)
     os.execl(sys.executable, sys.executable, *sys.argv)
 
-@app.on_message((filters.video | filters.document | filters.regex(r"https?://")) & filters.private)
+@app.on_message((filters.video | filters.document) & filters.private)
 async def handle_input(client, message):
     uid = message.from_user.id
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
     user_settings[uid]['orig_msg'] = message
-    await message.reply("🎬 **Video detectado.** Elige una opción:", reply_markup=get_main_menu(uid))
+    await message.reply(f"🎬 **Menú de Procesamiento**\n\n{get_config_summary(uid)}", reply_markup=get_main_menu(uid))
 
 @app.on_callback_query()
 async def cb_handler(client, query):
     uid, data = query.from_user.id, query.data
-    if data == "run_comp":
+    
+    if data == "menu_settings":
+        await query.message.edit(f"🛠️ **Ajustes de Compresión**\n\n{get_config_summary(uid)}", reply_markup=get_settings_menu(uid))
+    elif data == "menu_main":
+        await query.message.edit(f"🎬 **Menú de Procesamiento**\n\n{get_config_summary(uid)}", reply_markup=get_main_menu(uid))
+    elif data == "run_comp":
         await processing_queue.put((uid, query.message, user_settings[uid], "comp"))
         await query.message.edit("⏳ En cola para compresión...")
     elif data == "run_audio_only":
@@ -222,15 +247,20 @@ async def cb_handler(client, query):
         val = data.split("_")[2]
         user_settings[uid]['crf'] = val
         user_settings[uid]['q_label'] = {"30":"Baja", "24":"Estándar", "18":"Súper"}[val]
-        await query.message.edit_reply_markup(get_main_menu(uid))
+        await query.message.edit(f"🛠️ **Ajustes de Compresión**\n\n{get_config_summary(uid)}", reply_markup=get_settings_menu(uid))
     elif data.startswith("set_r_"):
         user_settings[uid]['res'] = data.split("_")[2]
-        await query.message.edit_reply_markup(get_main_menu(uid))
+        await query.message.edit(f"🛠️ **Ajustes de Compresión**\n\n{get_config_summary(uid)}", reply_markup=get_settings_menu(uid))
+    elif data.startswith("set_v_"):
+        parts = data.split("_")
+        user_settings[uid]['preset'] = parts[2]
+        user_settings[uid]['v_label'] = parts[3]
+        await query.message.edit(f"🛠️ **Ajustes de Compresión**\n\n{get_config_summary(uid)}", reply_markup=get_settings_menu(uid))
     elif data.startswith("set_aud_"):
         parts = data.split("_")
         user_settings[uid]['audio_codec'] = parts[2]
         user_settings[uid]['a_label'] = parts[3]
-        await query.message.edit_reply_markup(get_main_menu(uid))
+        await query.message.edit(f"🎬 **Menú de Procesamiento**\n\n{get_config_summary(uid)}", reply_markup=get_main_menu(uid))
     elif data.startswith("abort_"):
         cancel_flags.add(uid)
         if uid in active_processes: active_processes[uid].terminate()
@@ -238,10 +268,6 @@ async def cb_handler(client, query):
 
 async def main_startup():
     await app.start()
-    await app.set_bot_commands([
-        BotCommand("start", "✨ Iniciar"),
-        BotCommand("reiniciar", "🚀 Reiniciar")
-    ])
     asyncio.create_task(worker())
     print("🔥 Bot iniciado correctamente")
     await asyncio.Event().wait()
