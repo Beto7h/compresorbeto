@@ -21,10 +21,9 @@ cancel_flags = set()
 DEFAULT_SETTINGS = {
     'crf': 24, 
     'preset': 'medium', 
-    'res': '720', # Resolución por defecto
+    'res': '720',
     'q_label': 'Estándar', 
-    'v_label': 'Medio',
-    'res_label': '720p'
+    'v_label': 'Medio'
 }
 
 # --- 🛠️ UTILIDADES DE SISTEMA ---
@@ -84,7 +83,7 @@ def get_main_menu(uid):
         [InlineKeyboardButton("🚀 INICIAR COMPRESIÓN", callback_data="run")]
     ])
 
-# --- 📊 BARRAS DE PROGRESO ---
+# --- 📊 BARRAS DE PROGRESO (DISEÑO UNIFICADO) ---
 async def progress_bar(current, total, status_msg, start_time, action):
     uid = status_msg.chat.id
     if uid in cancel_flags: raise Exception("USER_ABORTED")
@@ -95,29 +94,26 @@ async def progress_bar(current, total, status_msg, start_time, action):
         speed = current / diff if diff > 0 else 0
         eta = get_eta(current, total, speed)
         bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
+        
         tmp = (f"📥 **{action}**\n"
                f"« {bar} »  **{percentage:.1f}%**\n\n"
                f"📊 **DATOS:** `{current/(1024**2):.1f}` / `{total/(1024**2):.1f}` MB\n"
-               f"🚀 **VEL:** `{speed/(1024**2):.2f}` MB/s\n\n"
+               f"🚀 **VEL:** `{speed/(1024**2):.2f}` MB/s | ⏳ **ETA:** `{eta}`\n\n"
                f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
+        
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]])
         try: await status_msg.edit(tmp, reply_markup=kb)
         except: pass
 
 async def compression_monitor(uid, msg, path, output_name, settings):
     duration = get_duration(path)
-    # FILTRO DE ESCALA: scale=-2:RES asegura que sea divisible por 2 para el códec h264
     scale_filter = f"scale=-2:{settings['res']}"
-    
     cmd = [
-        "ffmpeg", "-y", "-i", path, 
-        "-vf", scale_filter,
+        "ffmpeg", "-y", "-i", path, "-vf", scale_filter,
         "-c:v", "libx264", "-crf", str(settings['crf']), 
-        "-preset", settings['preset'], 
-        "-c:a", "libmp3lame", "-b:a", "128k", 
+        "-preset", settings['preset'], "-c:a", "libmp3lame", "-b:a", "128k", 
         "-progress", "pipe:1", output_name
     ]
-    
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     active_processes[uid] = proc
     start_time = time.time()
@@ -135,11 +131,17 @@ async def compression_monitor(uid, msg, path, output_name, settings):
                     percentage = min((current_time_sec / duration) * 100, 100)
                     elapsed = time.time() - start_time
                     speed_factor = current_time_sec / elapsed if elapsed > 0 else 0
+                    eta_sec = (duration - current_time_sec) / speed_factor if speed_factor > 0 else 0
+                    eta = time.strftime('%H:%M:%S', time.gmtime(eta_sec))
                     bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
-                    tmp = (f"⚙️ **COMPRIMIENDO A {settings['res']}p**\n"
+                    
+                    # APLICAMOS EL MISMO DISEÑO QUE EL PROGRESS BAR
+                    tmp = (f"⚙️ **COMPRIMIENDO VIDEO**\n"
                            f"« {bar} »  **{percentage:.1f}%**\n\n"
-                           f"🚀 **VEL:** `{speed_factor:.2f}x` | 📺 **RES:** `{settings['res']}p`\n\n"
+                           f"📺 **RES:** `{settings['res']}p` | 🚀 **V-ETA:** `{speed_factor:.2f}x`\n"
+                           f"⏳ **TIEMPO RESTANTE:** `{eta}`\n\n"
                            f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
+                    
                     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]])
                     try: await msg.edit(tmp, reply_markup=kb)
                     except: pass
@@ -151,19 +153,6 @@ async def compression_monitor(uid, msg, path, output_name, settings):
     await proc.wait()
 
 # --- ⚙️ LÓGICA DE PROCESAMIENTO ---
-async def split_video(input_file):
-    size_mb = os.path.getsize(input_file) / (1024 * 1024)
-    if size_mb <= 1950: return [input_file]
-    duration = get_duration(input_file)
-    half = duration / 2
-    parts = []
-    for i in range(2):
-        out = f"{os.path.splitext(input_file)[0]}_p{i+1}.mp4"
-        ss = "0" if i == 0 else str(half)
-        subprocess.run(["ffmpeg", "-y", "-ss", ss, "-t", str(half), "-i", input_file, "-c", "copy", out])
-        parts.append(out)
-    return parts
-
 async def process_logic(uid, msg, settings):
     orig_msg = settings['orig_msg']
     file_original_name, ext_orig = "video", ".mp4"
@@ -175,7 +164,6 @@ async def process_logic(uid, msg, settings):
         ext_orig = os.path.splitext(orig_msg.document.file_name)[1] or ".mp4"
 
     input_path = os.path.join(Config.DOWNLOAD_PATH, f"input_{uid}{ext_orig}")
-    
     try:
         if orig_msg.video or orig_msg.document:
             path = await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "DESCARGANDO"))
@@ -187,18 +175,14 @@ async def process_logic(uid, msg, settings):
         output_name = f"{file_original_name}_compres_beto.mp4"
         await compression_monitor(uid, msg, path, output_name, settings)
         thumb = generate_thumbnail(output_name, uid)
-
-        final_files = await split_video(output_name)
-        for f in final_files:
-            duration = int(get_duration(f))
-            await app.send_video(
-                chat_id=uid, video=f, duration=duration, thumb=thumb,
-                progress=progress_bar, progress_args=(msg, time.time(), "SUBIENDO"), 
-                caption=f"✅ **¡{os.path.basename(f)} ({settings['res']}p) Completado!**"
-            )
+        
+        await app.send_video(
+            chat_id=uid, video=output_name, duration=int(get_duration(output_name)), thumb=thumb,
+            progress=progress_bar, progress_args=(msg, time.time(), "SUBIENDO"), 
+            caption=f"✅ **¡{output_name} ({settings['res']}p) Completado!**"
+        )
         try: await msg.delete()
         except: pass
-
     except Exception as e:
         if "USER_ABORTED" in str(e): await msg.edit("❌ **Proceso cancelado.**")
         else: await msg.edit(f"❌ **Error:** `{e}`")
@@ -219,7 +203,17 @@ async def worker():
 async def start_cmd(client, message):
     uid = message.from_user.id
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
-    await message.reply(f"✨ **¡Bienvenido al Compresor Élite!**\n\nEnvíame un video o link para comenzar.\n\n{get_sys_stats_raw()}")
+    
+    bienvenida = (
+        "✨ **¡Bienvenido al Compresor Élite!**\n\n"
+        "Soy un bot optimizado para comprimir tus videos con la mejor relación calidad/peso.\n\n"
+        "**¿Cómo empezar?**\n"
+        "1️⃣ Envíame un video o un enlace directo.\n"
+        "2️⃣ Configura la calidad y resolución.\n"
+        "3️⃣ Presiona **Iniciar Compresión**.\n\n"
+        f"{get_sys_stats_raw()}"
+    )
+    await message.reply(bienvenida)
 
 @app.on_message(filters.command("update") & filters.private)
 async def update_cmd(client, message):
@@ -227,10 +221,19 @@ async def update_cmd(client, message):
     cleanup(uid)
     try:
         pull_output = subprocess.check_output(["git", "pull"]).decode("utf-8")
-        github_status = "✅ Ya actualizado." if "Already up to date." in pull_output else "📥 ¡Código actualizado!"
+        github_status = "✅ Ya actualizado." if "Already up to date." in pull_output else "📥 ¡Código actualizado! Usa /reiniciar"
     except: github_status = "⚠️ Error en Git."
-
     await message.reply(f"🔄 **Update & Cleanup**\n\n{github_status}\n\n{get_sys_stats_raw()}")
+
+@app.on_message(filters.command("reiniciar") & filters.private)
+async def restart_cmd(client, message):
+    restart_img = "https://telegra.ph/file/a8a183d20199725f4632a.jpg"
+    await message.reply_photo(
+        photo=restart_img,
+        caption="🚀 **Reiniciando el sistema...**\n\nEl bot se apagará y volverá a encender en unos segundos para aplicar los cambios.\n\n⌛ *Espere un momento...*"
+    )
+    await asyncio.sleep(2)
+    os.execl(sys.executable, sys.executable, *sys.argv)
 
 @app.on_message((filters.video | filters.document | filters.regex(r"https?://")) & filters.private)
 async def handle_input(client, message):
@@ -267,6 +270,14 @@ async def cb_handler(client, query):
 
 async def main_startup():
     await app.start()
+    
+    # CONFIGURACIÓN AUTOMÁTICA DE COMANDOS EN EL MENÚ DEL BOT
+    await app.set_bot_commands([
+        BotCommand("start", "✨ Iniciar el bot"),
+        BotCommand("reiniciar", "🚀 Reiniciar sistema y aplicar cambios"),
+        BotCommand("update", "🔄 Actualizar desde GitHub")
+    ])
+    
     asyncio.create_task(worker())
     print("🔥 Bot iniciado correctamente")
     await asyncio.Event().wait()
