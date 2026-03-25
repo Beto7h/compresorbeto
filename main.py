@@ -43,8 +43,9 @@ def get_eta(current, total, speed):
     return time.strftime('%H:%M:%S', time.gmtime(remaining_time))
 
 def cleanup(uid):
+    # CORRECCIÓN: exist_ok en lugar de exist_8000
     shutil.rmtree(Config.DOWNLOAD_PATH, ignore_errors=True)
-    os.makedirs(Config.DOWNLOAD_PATH, exist_8000=True)
+    os.makedirs(Config.DOWNLOAD_PATH, exist_ok=True)
     for f in os.listdir("."):
         if f"_{uid}" in f or "_convertido" in f or "_compres" in f:
             try: os.remove(f)
@@ -83,7 +84,6 @@ def get_config_summary(uid):
 
 def get_main_menu(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
-    # Indicadores ✅ para los botones de formato
     keep_v = "✅ " if s.get('keep_format', True) else ""
     force_v = "✅ " if not s.get('keep_format', True) else ""
     
@@ -176,9 +176,9 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
 
 # --- ⚙️ LÓGICA DE PROCESAMIENTO ---
 async def process_logic(uid, msg, settings, mode):
+    print(f"DEBUG: Iniciando proceso para {uid} en modo {mode}")
     orig_msg = settings['orig_msg']
     
-    # Obtener nombre y extensión real del archivo enviado
     if orig_msg.video:
         full_name = orig_msg.video.file_name or "video.mp4"
     elif orig_msg.document:
@@ -190,24 +190,25 @@ async def process_logic(uid, msg, settings, mode):
     input_path = os.path.join(Config.DOWNLOAD_PATH, f"in_{uid}_{int(time.time())}{file_ext}")
 
     try:
+        print(f"DEBUG: Descargando archivo...")
         await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "DESCARGANDO"))
+        
         duration = get_duration(input_path)
+        print(f"DEBUG: Duración detectada: {duration}s")
 
         if mode == "audio_only":
-            # Elegir extensión según botón seleccionado
             target_ext = file_ext if settings.get('keep_format', True) else ".mp4"
             output_path = f"{file_name}_audio{target_ext}"
-            
-            # -c:v copy mantiene el video original, solo cambia audio
             cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "copy", "-c:a", settings['audio_codec'], "-b:a", "192k", "-map", "0", "-progress", "pipe:1", output_path]
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "CONVIRTIENDO AUDIO")
         else:
-            # Compresión siempre termina en .mp4
             output_path = f"{file_name}_compres.mp4"
             scale = f"scale=-2:{settings['res']}"
             cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", scale, "-c:v", "libx264", "-crf", str(settings['crf']), "-preset", settings['preset'], "-c:a", "libmp3lame", "-b:a", "128k", "-progress", "pipe:1", output_path]
+            print(f"DEBUG: Ejecutando Compresión...")
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "COMPRIMIENDO VIDEO")
 
+        print(f"DEBUG: Subiendo resultado...")
         thumb = generate_thumbnail(output_path, uid)
         await app.send_video(
             chat_id=uid, video=output_path, duration=int(get_duration(output_path)), thumb=thumb,
@@ -217,6 +218,7 @@ async def process_logic(uid, msg, settings, mode):
         try: await msg.delete()
         except: pass
     except Exception as e:
+        print(f"DEBUG ERROR: {e}")
         if "USER_ABORTED" in str(e): await msg.edit("❌ **Proceso cancelado por el usuario.**")
         else: await msg.edit(f"❌ **Error:** `{e}`")
     finally:
@@ -253,7 +255,6 @@ async def handle_input(client, message):
 @app.on_callback_query()
 async def cb_handler(client, query):
     uid, data = query.from_user.id, query.data
-    
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
 
     if data == "menu_settings":
