@@ -192,6 +192,13 @@ async def process_logic(uid, msg, settings):
                 progress=progress_bar, progress_args=(msg, time.time(), "SUBIENDO"), 
                 caption=f"✅ **¡{os.path.basename(f)} Completado!**"
             )
+        
+        # --- LIMPIEZA DEL MENSAJE DE PROGRESO ---
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
     except Exception as e:
         if "USER_ABORTED" in str(e): await msg.edit("❌ **Proceso cancelado.**")
         else: await msg.edit(f"❌ **Error:** `{e}`")
