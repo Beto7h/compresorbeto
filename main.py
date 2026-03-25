@@ -14,7 +14,6 @@ app = Client(
 
 # --- 🌍 VARIABLES GLOBALES ---
 processing_queue = asyncio.Queue()
-is_processing = False
 user_settings = {} 
 active_processes = {} 
 cancel_flags = set()
@@ -32,7 +31,7 @@ def get_sys_stats_raw():
     ram = psutil.virtual_memory().percent
     _, _, free = shutil.disk_usage(".")
     disk_gb = free // (1024**3)
-    return f"⚙️ CPU: `{cpu}%` | 🧠 RAM: `{ram}%` | 💽 Disco: `{disk_gb}GB`"
+    return f"⚙️ **CPU:** `{cpu}%` | 🧠 **RAM:** `{ram}%` | 💽 **Disco:** `{disk_gb}GB`"
 
 def get_eta(current, total, speed):
     if speed <= 0: return "calculando..."
@@ -43,7 +42,7 @@ def cleanup(uid):
     shutil.rmtree(Config.DOWNLOAD_PATH, ignore_errors=True)
     os.makedirs(Config.DOWNLOAD_PATH, exist_ok=True)
     for f in os.listdir("."):
-        if "_comprimido_" in f or f.endswith((".zip", ".rar", ".7z", ".mp4", ".mkv")):
+        if "_compres_beto" in f or f.endswith((".zip", ".rar", ".7z", ".mp4", ".mkv", ".jpg")):
             try: os.remove(f)
             except: pass
 
@@ -52,6 +51,18 @@ def get_duration(file):
         cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file]
         return float(subprocess.check_output(cmd).decode("utf-8").strip())
     except: return 0
+
+def generate_thumbnail(video_path, uid):
+    thumb_path = f"thumb_{uid}.jpg"
+    try:
+        subprocess.run([
+            "ffmpeg", "-y", "-ss", "00:00:05", "-i", video_path, 
+            "-vframes", "1", "-q:v", "2", thumb_path
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(thumb_path):
+            return thumb_path
+    except: pass
+    return None
 
 # --- 🎮 MENÚS ---
 def get_main_menu(uid):
@@ -80,10 +91,9 @@ async def progress_bar(current, total, status_msg, start_time, action):
         percentage = current * 100 / total
         speed = current / diff if diff > 0 else 0
         eta = get_eta(current, total, speed)
-        
         bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
         
-        tmp = (f"📤 **{action}**\n"
+        tmp = (f"📥 **{action}**\n"
                f"« {bar} »  **{percentage:.1f}%**\n\n"
                f"📊 **DATOS:** `{current/(1024**2):.1f}` / `{total/(1024**2):.1f}` MB\n"
                f"🚀 **VEL:** `{speed/(1024**2):.2f}` MB/s | ⏳ **ETA:** `{eta}`\n\n"
@@ -97,7 +107,7 @@ async def compression_monitor(uid, msg, path, output_name, settings):
     duration = get_duration(path)
     cmd = [
         "ffmpeg", "-y", "-i", path, "-c:v", "libx264", "-crf", str(settings['crf']), 
-        "-preset", settings['preset'], "-c:a", "aac", "-b:a", "128k", "-progress", "pipe:1", output_name
+        "-preset", settings['preset'], "-c:a", "libmp3lame", "-b:a", "128k", "-progress", "pipe:1", output_name
     ]
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     active_processes[uid] = proc
@@ -108,12 +118,10 @@ async def compression_monitor(uid, msg, path, output_name, settings):
         line = await proc.stdout.readline()
         if not line: break
         text = line.decode("utf-8")
-        
         if "out_time_ms=" in text:
             try:
                 ms = int(text.split("=")[1])
                 current_time_sec = ms / 1000000
-                
                 if duration > 0 and (time.time() - last_update) > 4:
                     percentage = min((current_time_sec / duration) * 100, 100)
                     elapsed = time.time() - start_time
@@ -121,14 +129,10 @@ async def compression_monitor(uid, msg, path, output_name, settings):
                     remaining_video = duration - current_time_sec
                     eta_sec = remaining_video / speed_factor if speed_factor > 0 else 0
                     eta = time.strftime('%H:%M:%S', time.gmtime(eta_sec))
-                    
                     bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
-                    curr_f = time.strftime('%H:%M:%S', time.gmtime(current_time_sec))
-                    total_f = time.strftime('%H:%M:%S', time.gmtime(duration))
                     
                     tmp = (f"⚙️ **COMPRIMIENDO VIDEO**\n"
                            f"« {bar} »  **{percentage:.1f}%**\n\n"
-                           f"⏳ **PROGRESO:** `{curr_f}` / `{total_f}`\n"
                            f"🚀 **VEL:** `{speed_factor:.2f}x` | ⏳ **ETA:** `{eta}`\n\n"
                            f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
                     
@@ -137,7 +141,6 @@ async def compression_monitor(uid, msg, path, output_name, settings):
                     except: pass
                     last_update = time.time()
             except: pass
-            
         if uid in cancel_flags:
             proc.terminate()
             raise Exception("USER_ABORTED")
@@ -159,21 +162,36 @@ async def split_video(input_file):
 
 async def process_logic(uid, msg, settings):
     orig_msg = settings['orig_msg']
-    input_path = os.path.join(Config.DOWNLOAD_PATH, f"input_{uid}")
+    file_original_name, ext_orig = "video", ".mp4"
+    if orig_msg.video:
+        file_original_name = os.path.splitext(orig_msg.video.file_name)[0]
+        ext_orig = os.path.splitext(orig_msg.video.file_name)[1] or ".mp4"
+    elif orig_msg.document:
+        file_original_name = os.path.splitext(orig_msg.document.file_name)[0]
+        ext_orig = os.path.splitext(orig_msg.document.file_name)[1] or ".mp4"
+
+    input_path = os.path.join(Config.DOWNLOAD_PATH, f"input_{uid}{ext_orig}")
+    
     try:
         if orig_msg.video or orig_msg.document:
             path = await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "DESCARGANDO"))
         else:
             await msg.edit(f"🌐 **Descargando link...**\n\n{get_sys_stats_raw()}")
-            subprocess.run(["aria2c", "-x", "16", "-o", f"input_{uid}", orig_msg.text, "-d", Config.DOWNLOAD_PATH])
+            subprocess.run(["aria2c", "-x", "16", "-o", f"input_{uid}{ext_orig}", orig_msg.text, "-d", Config.DOWNLOAD_PATH])
             path = input_path
 
-        output_name = f"video_{uid}_comprimido_.mp4"
+        output_name = f"{file_original_name}_compres_beto.mp4"
         await compression_monitor(uid, msg, path, output_name, settings)
+        thumb = generate_thumbnail(output_name, uid)
 
         final_files = await split_video(output_name)
         for f in final_files:
-            await app.send_video(chat_id=uid, video=f, progress=progress_bar, progress_args=(msg, time.time(), "SUBIENDO"), caption=f"✅ **¡Completado!**")
+            duration = int(get_duration(f))
+            await app.send_video(
+                chat_id=uid, video=f, duration=duration, thumb=thumb,
+                progress=progress_bar, progress_args=(msg, time.time(), "SUBIENDO"), 
+                caption=f"✅ **¡{os.path.basename(f)} Completado!**"
+            )
     except Exception as e:
         if "USER_ABORTED" in str(e): await msg.edit("❌ **Proceso cancelado.**")
         else: await msg.edit(f"❌ **Error:** `{e}`")
@@ -192,24 +210,28 @@ async def worker():
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message):
     uid = message.from_user.id
+    name = message.from_user.first_name
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
-    await message.reply(f"👋 **¡Hola!**\n\n{get_sys_stats_raw()}", reply_markup=get_main_menu(uid))
-
-@app.on_message(filters.command("update"))
-async def update_cmd(client, message):
-    msg = await message.reply("🔄 **Actualizando...**")
-    try:
-        subprocess.check_output(["git", "pull"])
-        await msg.edit("✅ **Reiniciando...**")
-        os.execl(sys.executable, sys.executable, *sys.argv)
-    except Exception as e: await msg.edit(f"❌ **Error:** `{e}`")
+    
+    welcome_text = (
+        f"✨ **¡Bienvenido al Compresor Élite, {name}!** ✨\n\n"
+        "🚀 **¿Qué puedo hacer por ti?**\n"
+        "Puedo comprimir tus videos manteniendo una calidad increíble y convirtiendo el audio a **MP3** para máxima compatibilidad.\n\n"
+        "📖 **Instrucciones:**\n"
+        "1️⃣ Envíame un video, un archivo o un enlace directo.\n"
+        "2️⃣ Elige la **Calidad** y **Velocidad** en el menú.\n"
+        "3️⃣ Presiona **Iniciar Compresión**.\n\n"
+        f"{get_sys_stats_raw()}\n\n"
+        "💎 *¡Listo para procesar tus archivos con eficiencia!*"
+    )
+    await message.reply(welcome_text)
 
 @app.on_message((filters.video | filters.document | filters.regex(r"https?://")) & filters.private)
 async def handle_input(client, message):
     uid = message.from_user.id
     user_settings[uid] = DEFAULT_SETTINGS.copy()
     user_settings[uid]['orig_msg'] = message
-    await message.reply(f"🎬 **Video detectado.**\n\n{get_sys_stats_raw()}", reply_markup=get_main_menu(uid))
+    await message.reply(f"🎬 **Video detectado.**\nConfigura los parámetros y presiona iniciar:\n\n{get_sys_stats_raw()}", reply_markup=get_main_menu(uid))
 
 @app.on_callback_query()
 async def cb_handler(client, query):
@@ -223,12 +245,13 @@ async def cb_handler(client, query):
         if proc: proc.terminate()
         await query.answer("🛑 Cancelando...")
     elif data.startswith("set_"):
-        if "q_" in data:
-            val = data.split("_")[2]
+        parts = data.split("_")
+        if parts[1] == "q":
+            val = parts[2]
             user_settings[uid]['crf'] = val
             user_settings[uid]['q_label'] = {"30":"Baja", "24":"Estándar", "18":"Súper"}[val]
         else:
-            val = data.split("_")[2]
+            val = parts[2]
             user_settings[uid]['preset'] = val
             user_settings[uid]['v_label'] = {"ultrafast":"Rápido", "medium":"Medio", "slower":"Lento"}[val]
         await query.message.edit_reply_markup(get_main_menu(uid))
@@ -236,6 +259,7 @@ async def cb_handler(client, query):
 async def main_startup():
     await app.start()
     asyncio.create_task(worker())
+    print("🔥 Bot iniciado correctamente")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
