@@ -234,17 +234,30 @@ async def start_cmd(client, message):
     )
     await message.reply(welcome_text)
 
-# COMANDO /UPDATE MEJORADO CON LIMPIEZA
+# COMANDO /UPDATE MEJORADO CON LIMPIEZA Y AUTO-PULL (GITHUB)
 @app.on_message(filters.command("update") & filters.private)
 async def update_cmd(client, message):
     uid = message.from_user.id
     # Ejecuta limpieza manual de archivos basura
     cleanup(uid)
+    
+    # Lógica de Auto-Pull de GitHub
+    try:
+        # Ejecuta git pull y captura la salida
+        pull_output = subprocess.check_output(["git", "pull"]).decode("utf-8")
+        if "Already up to date." in pull_output:
+            github_status = "✅ **Código:** Ya está actualizado con GitHub."
+        else:
+            github_status = "📥 **Código:** ¡Actualizado con éxito! (Reinicia el bot para aplicar)."
+    except Exception as e:
+        github_status = f"⚠️ **GitHub:** No se pudo actualizar (`{e}`)"
+
     await message.reply(
         "🔄 **Mantenimiento y Actualización**\n\n"
+        f"{github_status}\n\n"
         f"{get_sys_stats_raw()}\n\n"
         "🧹 **Limpieza:** Archivos temporales eliminados.\n"
-        "✅ **Estado:** Servidor optimizado y listo."
+        "✅ **Estado:** Servidor optimizado."
     )
 
 @app.on_message((filters.video | filters.document | filters.regex(r"https?://")) & filters.private)
