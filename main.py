@@ -39,8 +39,10 @@ def get_eta(current, total, speed):
     return time.strftime('%H:%M:%S', time.gmtime(remaining_time))
 
 def cleanup(uid):
+    # Limpia la carpeta de descargas configurada
     shutil.rmtree(Config.DOWNLOAD_PATH, ignore_errors=True)
     os.makedirs(Config.DOWNLOAD_PATH, exist_ok=True)
+    # Limpia archivos temporales en la raíz
     for f in os.listdir("."):
         if "_compres_beto" in f or f.endswith((".zip", ".rar", ".7z", ".mp4", ".mkv", ".jpg")):
             try: os.remove(f)
@@ -193,11 +195,9 @@ async def process_logic(uid, msg, settings):
                 caption=f"✅ **¡{os.path.basename(f)} Completado!**"
             )
         
-        # --- LIMPIEZA DEL MENSAJE DE PROGRESO ---
-        try:
-            await msg.delete()
-        except Exception:
-            pass
+        # ELIMINA EL MENSAJE DE PROGRESO AL TERMINAR
+        try: await msg.delete()
+        except: pass
 
     except Exception as e:
         if "USER_ABORTED" in str(e): await msg.edit("❌ **Proceso cancelado.**")
@@ -214,6 +214,7 @@ async def worker():
         processing_queue.task_done()
 
 # --- 💬 MANEJADORES ---
+
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message):
     uid = message.from_user.id
@@ -232,6 +233,19 @@ async def start_cmd(client, message):
         "💎 *¡Listo para procesar tus archivos con eficiencia!*"
     )
     await message.reply(welcome_text)
+
+# COMANDO /UPDATE MEJORADO CON LIMPIEZA
+@app.on_message(filters.command("update") & filters.private)
+async def update_cmd(client, message):
+    uid = message.from_user.id
+    # Ejecuta limpieza manual de archivos basura
+    cleanup(uid)
+    await message.reply(
+        "🔄 **Mantenimiento y Actualización**\n\n"
+        f"{get_sys_stats_raw()}\n\n"
+        "🧹 **Limpieza:** Archivos temporales eliminados.\n"
+        "✅ **Estado:** Servidor optimizado y listo."
+    )
 
 @app.on_message((filters.video | filters.document | filters.regex(r"https?://")) & filters.private)
 async def handle_input(client, message):
