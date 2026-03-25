@@ -25,7 +25,8 @@ DEFAULT_SETTINGS = {
     'q_label': 'Estándar', 
     'v_label': 'Medio',
     'audio_codec': 'libmp3lame',
-    'a_label': 'MP3'
+    'a_label': 'MP3',
+    'keep_format': True  # True: Original, False: MP4
 }
 
 # --- 🛠️ UTILIDADES DE SISTEMA ---
@@ -43,7 +44,7 @@ def get_eta(current, total, speed):
 
 def cleanup(uid):
     shutil.rmtree(Config.DOWNLOAD_PATH, ignore_errors=True)
-    os.makedirs(Config.DOWNLOAD_PATH, exist_ok=True)
+    os.makedirs(Config.DOWNLOAD_PATH, exist_8000=True)
     for f in os.listdir("."):
         if f"_{uid}" in f or "_convertido" in f or "_compres" in f:
             try: os.remove(f)
@@ -71,22 +72,30 @@ def generate_thumbnail(video_path, uid):
 
 def get_config_summary(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
+    f_label = "Original" if s.get('keep_format', True) else "MP4"
     return (f"📝 **RESUMEN DE CONFIGURACIÓN:**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"💎 **Calidad:** `{s['q_label']}` (CRF {s['crf']})\n"
             f"📏 **Resolución:** `{s['res']}p`\n"
             f"⚡ **Velocidad:** `{s['v_label']}`\n"
-            f"🎵 **Audio:** `{s['a_label']}`\n"
+            f"🎵 **Audio:** `{s['a_label']}` | 📦 **Formato:** `{f_label}`\n"
             f"━━━━━━━━━━━━━━━━━━━━")
 
 def get_main_menu(uid):
+    s = user_settings.get(uid, DEFAULT_SETTINGS)
+    # Indicadores ✅ para los botones de formato
+    keep_v = "✅ " if s.get('keep_format', True) else ""
+    force_v = "✅ " if not s.get('keep_format', True) else ""
+    
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎞️ AJUSTES DE COMPRESIÓN", callback_data="menu_settings")],
         [InlineKeyboardButton("🚀 INICIAR COMPRESIÓN", callback_data="run_comp")],
         [InlineKeyboardButton("─── OPCIONES DE AUDIO ───", callback_data="n")],
-        [InlineKeyboardButton("MP3", callback_data="set_aud_libmp3lame_MP3"),
-         InlineKeyboardButton("AAC", callback_data="set_aud_aac_AAC")],
-        [InlineKeyboardButton("⚡ CONVERTIR AUDIO A MP4", callback_data="run_audio_only")]
+        [InlineKeyboardButton(f"{'✅ ' if s.get('a_label')=='MP3' else ''}MP3", callback_data="set_aud_libmp3lame_MP3"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('a_label')=='AAC' else ''}AAC", callback_data="set_aud_aac_AAC")],
+        [InlineKeyboardButton(f"{keep_v}MANTENER ORIGINAL", callback_data="mode_keep"),
+         InlineKeyboardButton(f"{force_v}CONVERTIR A MP4", callback_data="mode_mp4")],
+        [InlineKeyboardButton("⚡ INICIAR PROCESO DE AUDIO", callback_data="run_audio_only")]
     ])
 
 def get_settings_menu(uid):
@@ -168,21 +177,33 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
 # --- ⚙️ LÓGICA DE PROCESAMIENTO ---
 async def process_logic(uid, msg, settings, mode):
     orig_msg = settings['orig_msg']
-    file_name = "video"
-    if orig_msg.video: file_name = os.path.splitext(orig_msg.video.file_name)[0]
-    elif orig_msg.document: file_name = os.path.splitext(orig_msg.document.file_name)[0]
+    
+    # Obtener nombre y extensión real del archivo enviado
+    if orig_msg.video:
+        full_name = orig_msg.video.file_name or "video.mp4"
+    elif orig_msg.document:
+        full_name = orig_msg.document.file_name or "video.mp4"
+    else:
+        full_name = "video.mp4"
 
-    input_path = os.path.join(Config.DOWNLOAD_PATH, f"in_{uid}_{int(time.time())}.mkv")
-    output_path = f"{file_name}_convertido.mp4"
+    file_name, file_ext = os.path.splitext(full_name)
+    input_path = os.path.join(Config.DOWNLOAD_PATH, f"in_{uid}_{int(time.time())}{file_ext}")
 
     try:
         await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "DESCARGANDO"))
         duration = get_duration(input_path)
 
         if mode == "audio_only":
+            # Elegir extensión según botón seleccionado
+            target_ext = file_ext if settings.get('keep_format', True) else ".mp4"
+            output_path = f"{file_name}_audio{target_ext}"
+            
+            # -c:v copy mantiene el video original, solo cambia audio
             cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "copy", "-c:a", settings['audio_codec'], "-b:a", "192k", "-map", "0", "-progress", "pipe:1", output_path]
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "CONVIRTIENDO AUDIO")
         else:
+            # Compresión siempre termina en .mp4
+            output_path = f"{file_name}_compres.mp4"
             scale = f"scale=-2:{settings['res']}"
             cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", scale, "-c:v", "libx264", "-crf", str(settings['crf']), "-preset", settings['preset'], "-c:a", "libmp3lame", "-b:a", "128k", "-progress", "pipe:1", output_path]
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "COMPRIMIENDO VIDEO")
@@ -233,6 +254,8 @@ async def handle_input(client, message):
 async def cb_handler(client, query):
     uid, data = query.from_user.id, query.data
     
+    if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
+
     if data == "menu_settings":
         await query.message.edit(f"🛠️ **Ajustes de Compresión**\n\n{get_config_summary(uid)}", reply_markup=get_settings_menu(uid))
     elif data == "menu_main":
@@ -243,6 +266,12 @@ async def cb_handler(client, query):
     elif data == "run_audio_only":
         await processing_queue.put((uid, query.message, user_settings[uid], "audio_only"))
         await query.message.edit("⏳ En cola para conversión de audio...")
+    elif data == "mode_keep":
+        user_settings[uid]['keep_format'] = True
+        await query.message.edit(f"🎬 **Menú de Procesamiento**\n\n{get_config_summary(uid)}", reply_markup=get_main_menu(uid))
+    elif data == "mode_mp4":
+        user_settings[uid]['keep_format'] = False
+        await query.message.edit(f"🎬 **Menú de Procesamiento**\n\n{get_config_summary(uid)}", reply_markup=get_main_menu(uid))
     elif data.startswith("set_q_"):
         val = data.split("_")[2]
         user_settings[uid]['crf'] = val
