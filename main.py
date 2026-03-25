@@ -91,6 +91,7 @@ async def progress_bar(current, total, status_msg, start_time, action):
     if uid in cancel_flags: raise Exception("USER_ABORTED")
     now = time.time()
     diff = now - start_time
+    # Actualización estricta cada 4 segundos o al finalizar
     if round(diff % 4.00) == 0 or current == total:
         percentage = current * 100 / total
         speed = current / diff if diff > 0 else 0
@@ -118,15 +119,17 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
             try:
                 ms = int(text.split("=")[1])
                 current_time_sec = ms / 1000000
+                # Ajustado a 4 segundos para evitar spam a Telegram
                 if duration > 0 and (time.time() - last_update) > 4:
                     percentage = min((current_time_sec / duration) * 100, 100)
                     elapsed = time.time() - start_time
                     speed_factor = current_time_sec / elapsed if elapsed > 0 else 0
-                    eta = time.strftime('%H:%M:%S', time.gmtime((duration - current_time_sec) / speed_factor)) if speed_factor > 0 else "..."
+                    eta_sec = (duration - current_time_sec) / speed_factor if speed_factor > 0 else 0
+                    eta = time.strftime('%H:%M:%S', time.gmtime(eta_sec))
                     bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
                     
                     tmp = (f"⚙️ **{mode_label}**\n« {bar} »  **{percentage:.1f}%**\n\n"
-                           f"📺 **MODO:** `{settings.get('a_label', 'Video')}` | 🚀 **V-ETA:** `{speed_factor:.2f}x`\n"
+                           f"🎵 **CÓDEC:** `{settings.get('a_label')}` | 🚀 **VEL:** `{speed_factor:.2f}x`\n"
                            f"⏳ **RESTANTE:** `{eta}`\n\n"
                            f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
                     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]])
@@ -154,7 +157,8 @@ async def process_logic(uid, msg, settings, mode):
         duration = get_duration(input_path)
 
         if mode == "audio_only":
-            cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "copy", "-c:a", settings['audio_codec'], "-b:a", "192k", "-map", "0", output_path]
+            # Agregamos -progress pipe:1 para que el ffmpeg_monitor pueda leer el flujo
+            cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "copy", "-c:a", settings['audio_codec'], "-b:a", "192k", "-map", "0", "-progress", "pipe:1", output_path]
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "CONVIRTIENDO AUDIO")
         else:
             scale = f"scale=-2:{settings['res']}"
@@ -170,7 +174,10 @@ async def process_logic(uid, msg, settings, mode):
         try: await msg.delete()
         except: pass
     except Exception as e:
-        await msg.edit(f"❌ **Error:** `{e}`")
+        if "USER_ABORTED" in str(e):
+             await msg.edit("❌ **Proceso cancelado por el usuario.**")
+        else:
+             await msg.edit(f"❌ **Error:** `{e}`")
     finally:
         active_processes.pop(uid, None)
         if uid in cancel_flags: cancel_flags.remove(uid)
