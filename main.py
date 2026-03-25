@@ -83,7 +83,7 @@ def get_main_menu(uid):
         [InlineKeyboardButton("🚀 INICIAR COMPRESIÓN", callback_data="run")]
     ])
 
-# --- 📊 BARRAS DE PROGRESO (DISEÑO UNIFICADO) ---
+# --- 📊 BARRAS DE PROGRESO ---
 async def progress_bar(current, total, status_msg, start_time, action):
     uid = status_msg.chat.id
     if uid in cancel_flags: raise Exception("USER_ABORTED")
@@ -135,7 +135,6 @@ async def compression_monitor(uid, msg, path, output_name, settings):
                     eta = time.strftime('%H:%M:%S', time.gmtime(eta_sec))
                     bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
                     
-                    # APLICAMOS EL MISMO DISEÑO QUE EL PROGRESS BAR
                     tmp = (f"⚙️ **COMPRIMIENDO VIDEO**\n"
                            f"« {bar} »  **{percentage:.1f}%**\n\n"
                            f"📺 **RES:** `{settings['res']}p` | 🚀 **V-ETA:** `{speed_factor:.2f}x`\n"
@@ -268,10 +267,11 @@ async def cb_handler(client, query):
             user_settings[uid]['res'] = val
         await query.message.edit_reply_markup(get_main_menu(uid))
 
+# --- 🚀 INICIO DEL BOT ---
 async def main_startup():
     await app.start()
     
-    # CONFIGURACIÓN AUTOMÁTICA DE COMANDOS EN EL MENÚ DEL BOT
+    # 🛠️ APLICACIÓN AUTOMÁTICA DE COMANDOS AL MENÚ
     await app.set_bot_commands([
         BotCommand("start", "✨ Iniciar el bot"),
         BotCommand("reiniciar", "🚀 Reiniciar sistema y aplicar cambios"),
@@ -279,7 +279,7 @@ async def main_startup():
     ])
     
     asyncio.create_task(worker())
-    print("🔥 Bot iniciado correctamente")
+    print("🔥 Bot iniciado correctamente y comandos configurados")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
