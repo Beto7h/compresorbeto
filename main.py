@@ -24,8 +24,8 @@ DEFAULT_SETTINGS = {
     'res': '720',
     'q_label': 'Estándar', 
     'v_label': 'Medio',
-    'audio_codec': 'libmp3lame',
-    'a_label': 'MP3',
+    'audio_codec': 'aac', # MEJORA: AAC para compatibilidad nativa
+    'a_label': 'AAC',
     'keep_format': True  # True: Original, False: MP4
 }
 
@@ -43,7 +43,6 @@ def get_eta(current, total, speed):
     return time.strftime('%H:%M:%S', time.gmtime(remaining_time))
 
 def cleanup(uid):
-    # CORRECCIÓN: exist_ok en lugar de exist_8000
     shutil.rmtree(Config.DOWNLOAD_PATH, ignore_errors=True)
     os.makedirs(Config.DOWNLOAD_PATH, exist_ok=True)
     for f in os.listdir("."):
@@ -179,10 +178,11 @@ async def process_logic(uid, msg, settings, mode):
     print(f"DEBUG: Iniciando proceso para {uid} en modo {mode}")
     orig_msg = settings['orig_msg']
     
+    # MEJORA: Obtener nombre original del archivo
     if orig_msg.video:
-        full_name = orig_msg.video.file_name or "video.mp4"
+        full_name = orig_msg.video.file_name or "video_sin_nombre.mp4"
     elif orig_msg.document:
-        full_name = orig_msg.document.file_name or "video.mp4"
+        full_name = orig_msg.document.file_name or "archivo_sin_nombre.mp4"
     else:
         full_name = "video.mp4"
 
@@ -204,16 +204,30 @@ async def process_logic(uid, msg, settings, mode):
         else:
             output_path = f"{file_name}_compres.mp4"
             scale = f"scale=-2:{settings['res']}"
-            cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", scale, "-c:v", "libx264", "-crf", str(settings['crf']), "-preset", settings['preset'], "-c:a", "libmp3lame", "-b:a", "128k", "-progress", "pipe:1", output_path]
+            # MEJORA: Agregamos format=yuv420p y forzamos audio a AAC para máxima compatibilidad
+            cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", f"{scale},format=yuv420p", "-c:v", "libx264", "-crf", str(settings['crf']), "-preset", settings['preset'], "-c:a", "aac", "-b:a", "128k", "-progress", "pipe:1", output_path]
             print(f"DEBUG: Ejecutando Compresión...")
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "COMPRIMIENDO VIDEO")
 
         print(f"DEBUG: Subiendo resultado...")
         thumb = generate_thumbnail(output_path, uid)
+        
+        # MEJORA: Caption con el nombre original del archivo
+        caption_final = (
+            f"📄 **Archivo:** `{full_name}`\n"
+            f"🎬 **Modo:** {'Solo Audio' if mode=='audio_only' else 'Compresión'}\n"
+            f"⚙️ **Preset:** `{settings['v_label']}` | 🎵: `{settings['a_label']}`"
+        )
+
         await app.send_video(
-            chat_id=uid, video=output_path, duration=int(get_duration(output_path)), thumb=thumb,
-            progress=progress_bar, progress_args=(msg, time.time(), "SUBIENDO"), 
-            caption=f"✅ **Proceso Completado**\n\n🎬 Modo: {'Solo Audio' if mode=='audio_only' else 'Compresión'}\n⚙️ Preset: `{settings['v_label']}` | 🎵: `{settings['a_label']}`"
+            chat_id=uid, 
+            video=output_path, 
+            duration=int(get_duration(output_path)), 
+            thumb=thumb,
+            supports_streaming=True, # MEJORA: Permite reproducir mientras descarga
+            progress=progress_bar, 
+            progress_args=(msg, time.time(), "SUBIENDO"), 
+            caption=caption_final
         )
         try: await msg.delete()
         except: pass
