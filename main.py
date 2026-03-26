@@ -31,7 +31,6 @@ DEFAULT_SETTINGS = {
 
 # --- 🛠️ UTILIDADES DE SISTEMA ---
 def clean_file_name(name):
-    """Limpia el nombre para evitar errores de lectura en FFmpeg"""
     name = re.sub(r'[^\w\s.-]', '', name)
     return name.replace(" ", "_")
 
@@ -174,8 +173,6 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
 # --- ⚙️ LÓGICA DE PROCESAMIENTO ---
 async def process_logic(uid, msg, settings, mode):
     orig_msg = settings['orig_msg']
-    
-    # Mejora: Nombre original limpio
     raw_name = orig_msg.video.file_name if orig_msg.video else (orig_msg.document.file_name if orig_msg.document else "video.mp4")
     full_name = clean_file_name(raw_name)
     file_name, file_ext = os.path.splitext(full_name)
@@ -190,16 +187,17 @@ async def process_logic(uid, msg, settings, mode):
         if mode == "audio_only":
             target_ext = file_ext if settings.get('keep_format', True) else ".mp4"
             output_path = f"{file_name}_audio{target_ext}"
-            cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "copy", "-c:a", settings['audio_codec'], "-b:a", "192k", "-map", "0", "-progress", "pipe:1", output_path]
+            # Usa el codec elegido (MP3/AAC)
+            cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "copy", "-c:a", str(settings['audio_codec']), "-b:a", "192k", "-map", "0", "-progress", "pipe:1", output_path]
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "CONVIRTIENDO AUDIO")
         else:
             scale = f"scale=-2:{settings['res']}"
-            # Mejora: Perfil High 4.1, yuv420p y movflags faststart para Plus Messenger
+            # Usa CRF y Preset elegidos por el usuario
             cmd = [
                 "ffmpeg", "-y", "-i", input_path,
                 "-vf", f"{scale},format=yuv420p",
                 "-c:v", "libx264", "-crf", str(settings['crf']),
-                "-preset", settings['preset'],
+                "-preset", str(settings['preset']),
                 "-profile:v", "high", "-level", "4.1",
                 "-c:a", "aac", "-b:a", "128k",
                 "-movflags", "+faststart",
@@ -211,7 +209,7 @@ async def process_logic(uid, msg, settings, mode):
         caption_final = (
             f"📄 **Archivo:** `{raw_name}`\n"
             f"🎬 **Modo:** {'Solo Audio' if mode=='audio_only' else 'Compresión'}\n"
-            f"⚙️ **Preset:** `{settings['v_label']}` | 🎵: `{settings['a_label']}`"
+            f"⚙️ **Calidad:** `{settings['q_label']}` | 🎵: `{settings['a_label']}`"
         )
 
         await app.send_video(
@@ -245,12 +243,6 @@ async def start_cmd(client, message):
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
     await message.reply(f"✨ **¡Bienvenido!** Envíame un video.\n\n{get_sys_stats_raw()}")
 
-@app.on_message(filters.command("reiniciar") & filters.private)
-async def restart_cmd(client, message):
-    await message.reply("🚀 **Reiniciando...**")
-    await asyncio.sleep(2)
-    os.execl(sys.executable, sys.executable, *sys.argv)
-
 @app.on_message((filters.video | filters.document) & filters.private)
 async def handle_input(client, message):
     uid = message.from_user.id
@@ -263,29 +255,41 @@ async def cb_handler(client, query):
     uid, data = query.from_user.id, query.data
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
 
-    if data == "menu_settings":
-        await query.message.edit(f"🛠️ **Ajustes de Compresión**\n\n{get_config_summary(uid)}", reply_markup=get_settings_menu(uid))
-    elif data == "menu_main":
-        await query.message.edit(f"🎬 **Menú de Procesamiento**\n\n{get_config_summary(uid)}", reply_markup=get_main_menu(uid))
-    elif data == "run_comp":
-        await processing_queue.put((uid, query.message, user_settings[uid], "comp"))
-        await query.message.edit("⏳ En cola para compresión...")
-    elif data == "run_audio_only":
-        await processing_queue.put((uid, query.message, user_settings[uid], "audio_only"))
-        await query.message.edit("⏳ En cola para audio...")
-    elif data.startswith("set_q_"):
+    # DETECCIÓN DE CAMBIOS REALES
+    if data.startswith("set_q_"):
         val = data.split("_")[2]
         user_settings[uid]['crf'] = val
         user_settings[uid]['q_label'] = {"30":"Baja", "24":"Estándar", "18":"Súper"}[val]
-        await query.message.edit(f"🛠️ **Ajustes**\n\n{get_config_summary(uid)}", reply_markup=get_settings_menu(uid))
+    elif data.startswith("set_r_"):
+        user_settings[uid]['res'] = data.split("_")[2]
+    elif data.startswith("set_v_"):
+        parts = data.split("_")
+        user_settings[uid]['preset'], user_settings[uid]['v_label'] = parts[2], parts[3]
     elif data.startswith("set_aud_"):
         parts = data.split("_")
         user_settings[uid]['audio_codec'], user_settings[uid]['a_label'] = parts[2], parts[3]
-        await query.message.edit(f"🎬 **Menú**\n\n{get_config_summary(uid)}", reply_markup=get_main_menu(uid))
+    elif data == "mode_keep":
+        user_settings[uid]['keep_format'] = True
+    elif data == "mode_mp4":
+        user_settings[uid]['keep_format'] = False
+
+    # EJECUCIÓN
+    if data == "run_comp":
+        # Pasamos una copia de los ajustes actuales para que FFmpeg los lea
+        await processing_queue.put((uid, query.message, user_settings[uid].copy(), "comp"))
+        await query.message.edit("⏳ En cola para compresión...")
+    elif data == "run_audio_only":
+        await processing_queue.put((uid, query.message, user_settings[uid].copy(), "audio_only"))
+        await query.message.edit("⏳ En cola para audio...")
     elif data.startswith("abort_"):
         cancel_flags.add(uid)
         if uid in active_processes: active_processes[uid].terminate()
-        await query.answer("🛑 Cancelando...")
+    else:
+        # Actualización visual del menú
+        text = f"🛠️ **Ajustes**\n\n{get_config_summary(uid)}" if "set_" in data or "settings" in data else f"🎬 **Menú**\n\n{get_config_summary(uid)}"
+        markup = get_settings_menu(uid) if "set_" in data or "settings" in data else get_main_menu(uid)
+        try: await query.message.edit(text, reply_markup=markup)
+        except: pass
 
 async def main_startup():
     await app.start()
