@@ -31,6 +31,7 @@ DEFAULT_SETTINGS = {
 
 # --- 🛠️ UTILIDADES DE SISTEMA ---
 def clean_file_name(name):
+    """Limpia el nombre para evitar errores de lectura en FFmpeg"""
     name = re.sub(r'[^\w\s.-]', '', name)
     return name.replace(" ", "_")
 
@@ -178,29 +179,33 @@ async def process_logic(uid, msg, settings, mode):
     file_name, file_ext = os.path.splitext(full_name)
     
     input_path = os.path.join(Config.DOWNLOAD_PATH, f"in_{uid}_{int(time.time())}{file_ext}")
-    output_path = os.path.join(os.getcwd(), f"{file_name}_compres.mp4")
+    output_path = os.path.join(os.getcwd(), f"{file_name}_final.mp4")
 
     try:
         await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "DESCARGANDO"))
         duration = get_duration(input_path)
 
         if mode == "audio_only":
-            target_ext = file_ext if settings.get('keep_format', True) else ".mp4"
-            output_path = f"{file_name}_audio{target_ext}"
-            # Usa el codec elegido (MP3/AAC)
-            cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "copy", "-c:a", str(settings['audio_codec']), "-b:a", "192k", "-map", "0", "-progress", "pipe:1", output_path]
+            # MEJORA: Copia video y recodifica audio con soporte de streaming
+            cmd = [
+                "ffmpeg", "-y", "-i", input_path, 
+                "-c:v", "copy", 
+                "-c:a", str(settings['audio_codec']), "-b:a", "192k", 
+                "-movflags", "+faststart", # Cuadrito de streaming para audio
+                "-map", "0", "-progress", "pipe:1", output_path
+            ]
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "CONVIRTIENDO AUDIO")
         else:
             scale = f"scale=-2:{settings['res']}"
-            # Usa CRF y Preset elegidos por el usuario
+            # MEJORA DEFINITIVA: Perfil High 4.1, Color YUV420P y Faststart
             cmd = [
                 "ffmpeg", "-y", "-i", input_path,
                 "-vf", f"{scale},format=yuv420p",
                 "-c:v", "libx264", "-crf", str(settings['crf']),
                 "-preset", str(settings['preset']),
-                "-profile:v", "high", "-level", "4.1",
+                "-profile:v", "high", "-level", "4.1", # Máxima compatibilidad Plus Messenger
                 "-c:a", "aac", "-b:a", "128k",
-                "-movflags", "+faststart",
+                "-movflags", "+faststart", # Habilita el cuadrito de streaming
                 "-progress", "pipe:1", output_path
             ]
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "COMPRIMIENDO VIDEO")
@@ -215,7 +220,8 @@ async def process_logic(uid, msg, settings, mode):
         await app.send_video(
             chat_id=uid, video=output_path, 
             duration=int(get_duration(output_path)), 
-            thumb=thumb, supports_streaming=True,
+            thumb=thumb, 
+            supports_streaming=True, # ACTIVA EL CUADRITO ROJO QUE PEDISTE
             progress=progress_bar, progress_args=(msg, time.time(), "SUBIENDO"), 
             caption=caption_final
         )
@@ -227,7 +233,9 @@ async def process_logic(uid, msg, settings, mode):
     finally:
         active_processes.pop(uid, None)
         if uid in cancel_flags: cancel_flags.remove(uid)
-        if os.path.exists(output_path): os.remove(output_path)
+        if os.path.exists(output_path): 
+            try: os.remove(output_path)
+            except: pass
         cleanup(uid)
 
 async def worker():
@@ -255,7 +263,6 @@ async def cb_handler(client, query):
     uid, data = query.from_user.id, query.data
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
 
-    # DETECCIÓN DE CAMBIOS REALES
     if data.startswith("set_q_"):
         val = data.split("_")[2]
         user_settings[uid]['crf'] = val
@@ -273,9 +280,7 @@ async def cb_handler(client, query):
     elif data == "mode_mp4":
         user_settings[uid]['keep_format'] = False
 
-    # EJECUCIÓN
     if data == "run_comp":
-        # Pasamos una copia de los ajustes actuales para que FFmpeg los lea
         await processing_queue.put((uid, query.message, user_settings[uid].copy(), "comp"))
         await query.message.edit("⏳ En cola para compresión...")
     elif data == "run_audio_only":
@@ -285,7 +290,6 @@ async def cb_handler(client, query):
         cancel_flags.add(uid)
         if uid in active_processes: active_processes[uid].terminate()
     else:
-        # Actualización visual del menú
         text = f"🛠️ **Ajustes**\n\n{get_config_summary(uid)}" if "set_" in data or "settings" in data else f"🎬 **Menú**\n\n{get_config_summary(uid)}"
         markup = get_settings_menu(uid) if "set_" in data or "settings" in data else get_main_menu(uid)
         try: await query.message.edit(text, reply_markup=markup)
