@@ -31,16 +31,20 @@ DEFAULT_SETTINGS = {
 
 # --- 🛠️ UTILIDADES DE SISTEMA ---
 def clean_file_name(name):
-    """Limpia el nombre para evitar errores de lectura en FFmpeg"""
-    name = re.sub(r'[^\w\s.-]', '', name)
-    return name.replace(" ", "_")
+    """Limpia profundamente el nombre para evitar errores en Linux/FFmpeg"""
+    # Quitamos la extensión original para limpiar solo el cuerpo del nombre
+    name_part = os.path.splitext(name)[0]
+    # Reemplazamos cualquier cosa que no sea letra o número por guiones bajos
+    clean = re.sub(r'[^a-zA-Z0-9]', '_', name_part)
+    # Evitamos guiones bajos duplicados
+    return re.sub(r'_+', '_', clean).strip('_')
 
 def get_sys_stats_raw():
     cpu = psutil.cpu_percent()
     ram = psutil.virtual_memory().percent
     _, _, free = shutil.disk_usage(".")
     disk_gb = free // (1024**3)
-    return f"⚙️ **CPU:** `{cpu}%` | 🧠 **RAM:** `{ram}%` | 💽 **Disco:** `{disk_gb}GB`"
+    return f"⚙️ **CPU:** `{cpu}%` | 🧠 **RAM:** `{ram}%` | 💽 **Disco:** `{disk_gb}GB` Cep"
 
 def get_eta(current, total, speed):
     if speed <= 0: return "calculando..."
@@ -51,7 +55,7 @@ def cleanup(uid):
     shutil.rmtree(Config.DOWNLOAD_PATH, ignore_errors=True)
     os.makedirs(Config.DOWNLOAD_PATH, exist_ok=True)
     for f in os.listdir("."):
-        if f"_{uid}" in f or "_convertido" in f or "_compres" in f:
+        if f"_{uid}" in f or "_final" in f:
             try: os.remove(f)
             except: pass
 
@@ -62,7 +66,7 @@ def get_duration(file):
     except: return 0
 
 def generate_thumbnail(video_path, uid):
-    thumb_path = f"thumb_{uid}.jpg"
+    thumb_path = os.path.abspath(f"thumb_{uid}.jpg")
     try:
         subprocess.run([
             "ffmpeg", "-y", "-ss", "00:00:05", "-i", video_path, 
@@ -175,67 +179,76 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
 async def process_logic(uid, msg, settings, mode):
     orig_msg = settings['orig_msg']
     raw_name = orig_msg.video.file_name if orig_msg.video else (orig_msg.document.file_name if orig_msg.document else "video.mp4")
-    full_name = clean_file_name(raw_name)
-    file_name, file_ext = os.path.splitext(full_name)
     
-    input_path = os.path.join(Config.DOWNLOAD_PATH, f"in_{uid}_{int(time.time())}{file_ext}")
-    output_path = os.path.join(os.getcwd(), f"{file_name}_final.mp4")
+    # LIMPIEZA CLAVE: Reemplazamos puntos y guiones conflictivos del nombre
+    clean_name = clean_file_name(raw_name)
+    
+    # RUTAS ABSOLUTAS: Evitamos errores en carpetas /root/
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    input_path = os.path.join(base_dir, f"in_{uid}_{int(time.time())}.mp4")
+    output_path = os.path.join(base_dir, f"{clean_name}_final.mp4")
 
     try:
         await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "DESCARGANDO"))
+        
+        if not os.path.exists(input_path):
+            raise Exception("No se pudo descargar el archivo.")
+
         duration = get_duration(input_path)
 
         if mode == "audio_only":
-            # MEJORA: Copia video y recodifica audio con soporte de streaming
+            # AUDIO + FASTSTART (Para el cuadrito)
             cmd = [
                 "ffmpeg", "-y", "-i", input_path, 
                 "-c:v", "copy", 
                 "-c:a", str(settings['audio_codec']), "-b:a", "192k", 
-                "-movflags", "+faststart", # Cuadrito de streaming para audio
-                "-map", "0", "-progress", "pipe:1", output_path
+                "-movflags", "+faststart", 
+                "-progress", "pipe:1", output_path
             ]
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "CONVIRTIENDO AUDIO")
         else:
             scale = f"scale=-2:{settings['res']}"
-            # MEJORA DEFINITIVA: Perfil High 4.1, Color YUV420P y Faststart
+            # VIDEO + COMPATIBILIDAD PLUS MESSENGER + FASTSTART
             cmd = [
                 "ffmpeg", "-y", "-i", input_path,
                 "-vf", f"{scale},format=yuv420p",
                 "-c:v", "libx264", "-crf", str(settings['crf']),
                 "-preset", str(settings['preset']),
-                "-profile:v", "high", "-level", "4.1", # Máxima compatibilidad Plus Messenger
+                "-profile:v", "high", "-level", "4.1", 
                 "-c:a", "aac", "-b:a", "128k",
-                "-movflags", "+faststart", # Habilita el cuadrito de streaming
+                "-movflags", "+faststart", 
                 "-progress", "pipe:1", output_path
             ]
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "COMPRIMIENDO VIDEO")
 
-        thumb = generate_thumbnail(output_path, uid)
-        caption_final = (
-            f"📄 **Archivo:** `{raw_name}`\n"
-            f"🎬 **Modo:** {'Solo Audio' if mode=='audio_only' else 'Compresión'}\n"
-            f"⚙️ **Calidad:** `{settings['q_label']}` | 🎵: `{settings['a_label']}`"
-        )
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            raise Exception("FFmpeg no generó el archivo de salida.")
 
+        thumb = generate_thumbnail(output_path, uid)
+        
         await app.send_video(
-            chat_id=uid, video=output_path, 
+            chat_id=uid, 
+            video=output_path, 
             duration=int(get_duration(output_path)), 
             thumb=thumb, 
-            supports_streaming=True, # ACTIVA EL CUADRITO ROJO QUE PEDISTE
+            supports_streaming=True, # HABILITA EL CUADRITO DE STREAMING
             progress=progress_bar, progress_args=(msg, time.time(), "SUBIENDO"), 
-            caption=caption_final
+            caption=f"✅ **Proceso Completado**\n\n📄 `{raw_name}`"
         )
         try: await msg.delete()
         except: pass
+
     except Exception as e:
         if "USER_ABORTED" in str(e): await msg.edit("❌ **Proceso cancelado.**")
         else: await msg.edit(f"❌ **Error:** `{e}`")
     finally:
         active_processes.pop(uid, None)
         if uid in cancel_flags: cancel_flags.remove(uid)
-        if os.path.exists(output_path): 
-            try: os.remove(output_path)
-            except: pass
+        # Limpieza de archivos específicos
+        for f in [input_path, output_path, f"thumb_{uid}.jpg"]:
+            if os.path.exists(f):
+                try: os.remove(f)
+                except: pass
         cleanup(uid)
 
 async def worker():
