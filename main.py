@@ -32,11 +32,10 @@ DEFAULT_SETTINGS = {
 # --- 🛠️ UTILIDADES DE SISTEMA ---
 def clean_file_name(name):
     """Limpia profundamente el nombre para evitar errores en Linux/FFmpeg"""
-    # Quitamos la extensión original para limpiar solo el cuerpo del nombre
+    if not name: return "video_procesado"
     name_part = os.path.splitext(name)[0]
-    # Reemplazamos cualquier cosa que no sea letra o número por guiones bajos
+    # Solo permitimos letras y números para el nombre del archivo en disco
     clean = re.sub(r'[^a-zA-Z0-9]', '_', name_part)
-    # Evitamos guiones bajos duplicados
     return re.sub(r'_+', '_', clean).strip('_')
 
 def get_sys_stats_raw():
@@ -44,7 +43,7 @@ def get_sys_stats_raw():
     ram = psutil.virtual_memory().percent
     _, _, free = shutil.disk_usage(".")
     disk_gb = free // (1024**3)
-    return f"⚙️ **CPU:** `{cpu}%` | 🧠 **RAM:** `{ram}%` | 💽 **Disco:** `{disk_gb}GB` Cep"
+    return f"⚙️ **CPU:** `{cpu}%` | 🧠 **RAM:** `{ram}%` | 💽 **Disco:** `{disk_gb}GB`"
 
 def get_eta(current, total, speed):
     if speed <= 0: return "calculando..."
@@ -52,10 +51,8 @@ def get_eta(current, total, speed):
     return time.strftime('%H:%M:%S', time.gmtime(remaining_time))
 
 def cleanup(uid):
-    shutil.rmtree(Config.DOWNLOAD_PATH, ignore_errors=True)
-    os.makedirs(Config.DOWNLOAD_PATH, exist_ok=True)
     for f in os.listdir("."):
-        if f"_{uid}" in f or "_final" in f:
+        if f"in_{uid}" in f or f"out_{uid}" in f or f"thumb_{uid}" in f:
             try: os.remove(f)
             except: pass
 
@@ -180,13 +177,14 @@ async def process_logic(uid, msg, settings, mode):
     orig_msg = settings['orig_msg']
     raw_name = orig_msg.video.file_name if orig_msg.video else (orig_msg.document.file_name if orig_msg.document else "video.mp4")
     
-    # LIMPIEZA CLAVE: Reemplazamos puntos y guiones conflictivos del nombre
-    clean_name = clean_file_name(raw_name)
+    # Nombre de salida dinámico basado en la preferencia del usuario
+    extension = os.path.splitext(raw_name)[1] if settings.get('keep_format', True) else ".mp4"
+    if not extension: extension = ".mp4"
     
-    # RUTAS ABSOLUTAS: Evitamos errores en carpetas /root/
+    # RUTAS SEGURAS (Nombre genérico para el servidor, evita fallos de caracteres)
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    input_path = os.path.join(base_dir, f"in_{uid}_{int(time.time())}.mp4")
-    output_path = os.path.join(base_dir, f"{clean_name}_final.mp4")
+    input_path = os.path.join(base_dir, f"in_{uid}_{int(time.time())}{os.path.splitext(raw_name)[1]}")
+    output_path = os.path.join(base_dir, f"out_{uid}_{int(time.time())}{extension}")
 
     try:
         await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "DESCARGANDO"))
@@ -197,7 +195,6 @@ async def process_logic(uid, msg, settings, mode):
         duration = get_duration(input_path)
 
         if mode == "audio_only":
-            # AUDIO + FASTSTART (Para el cuadrito)
             cmd = [
                 "ffmpeg", "-y", "-i", input_path, 
                 "-c:v", "copy", 
@@ -208,7 +205,6 @@ async def process_logic(uid, msg, settings, mode):
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "CONVIRTIENDO AUDIO")
         else:
             scale = f"scale=-2:{settings['res']}"
-            # VIDEO + COMPATIBILIDAD PLUS MESSENGER + FASTSTART
             cmd = [
                 "ffmpeg", "-y", "-i", input_path,
                 "-vf", f"{scale},format=yuv420p",
@@ -231,7 +227,8 @@ async def process_logic(uid, msg, settings, mode):
             video=output_path, 
             duration=int(get_duration(output_path)), 
             thumb=thumb, 
-            supports_streaming=True, # HABILITA EL CUADRITO DE STREAMING
+            file_name=raw_name, # ESTO MANTIENE EL NOMBRE ORIGINAL AL RECIBIRLO
+            supports_streaming=True, 
             progress=progress_bar, progress_args=(msg, time.time(), "SUBIENDO"), 
             caption=f"✅ **Proceso Completado**\n\n📄 `{raw_name}`"
         )
@@ -244,11 +241,6 @@ async def process_logic(uid, msg, settings, mode):
     finally:
         active_processes.pop(uid, None)
         if uid in cancel_flags: cancel_flags.remove(uid)
-        # Limpieza de archivos específicos
-        for f in [input_path, output_path, f"thumb_{uid}.jpg"]:
-            if os.path.exists(f):
-                try: os.remove(f)
-                except: pass
         cleanup(uid)
 
 async def worker():
