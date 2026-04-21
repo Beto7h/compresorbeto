@@ -1,4 +1,4 @@
-import os, time, asyncio, psutil, shutil, subprocess, re, sys, yt_dlp
+}import os, time, asyncio, psutil, shutil, subprocess, re, sys, yt_dlp
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from config import Config
@@ -83,11 +83,10 @@ async def progress_bar(current, total, status_msg, start_time, action):
         try: await status_msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]]))
         except: pass
 
-# --- 📥 LÓGICA DE LEECH CON PROGRESO CORREGIDA ---
+# --- 📥 LÓGICA DE LEECH CON PROGRESO Y VARIABLE P CORREGIDA ---
 async def download_link(url, custom_name, msg, uid):
     last_update_time[uid] = 0
     start_time = time.time()
-    # Capturamos el bucle de eventos del hilo principal
     loop = asyncio.get_running_loop()
 
     def ytdl_hook(d):
@@ -95,7 +94,6 @@ async def download_link(url, custom_name, msg, uid):
             current = d.get('downloaded_bytes', 0)
             total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
             if total > 0:
-                # Enviamos la actualización al hilo principal de forma segura
                 asyncio.run_coroutine_threadsafe(
                     progress_bar(current, total, msg, start_time, "LEECH (DESCARGANDO)"), 
                     loop
@@ -109,7 +107,6 @@ async def download_link(url, custom_name, msg, uid):
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Ejecutamos la extracción/descarga en un hilo separado para no congelar el bot
             info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
             filename = ydl.prepare_filename(info)
 
@@ -119,11 +116,17 @@ async def download_link(url, custom_name, msg, uid):
             os.rename(filename, new_path)
             filename = new_path
 
+        # CORRECCIÓN DE VARIABLE P AQUÍ
         class FakeMessage:
             def __init__(self, p, n):
                 self.video = type('obj', (object,), {'file_name': n})
-                self.document = None; self.chat = msg.chat; self.from_user = msg.from_user
-            async def download(self, **kwargs): return p
+                self.document = None
+                self.chat = msg.chat
+                self.from_user = msg.from_user
+                self.file_path = p # Guardamos la ruta 'p' en la instancia
+
+            async def download(self, **kwargs): 
+                return self.file_path # Devolvemos la ruta guardada
 
         if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
         user_settings[uid]['orig_msg'] = FakeMessage(filename, os.path.basename(filename))
