@@ -94,10 +94,10 @@ async def progress_bar(current, total, status_msg, start_time, action):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 CANCELAR", callback_data=f"abort_{uid}")]])
             )
         except FloodWait as e:
-            await asyncio.sleep(e.value) # Si Telegram nos frena, esperamos
+            await asyncio.sleep(e.value)
         except: pass
 
-# --- 📥 LÓGICA DE LEECH (Integración Aria2 + Progress) ---
+# --- 📥 LÓGICA DE LEECH (Integración Aria2 Optimizada) ---
 async def download_link(url, custom_name, msg, uid):
     last_update_time[uid] = 0
     start_time = time.time()
@@ -110,7 +110,6 @@ async def download_link(url, custom_name, msg, uid):
             current = d.get('downloaded_bytes', 0)
             total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
             if total > 0:
-                # Threadsafe es vital aquí para que el hilo de yt-dlp hable con el bot
                 asyncio.run_coroutine_threadsafe(
                     progress_bar(current, total, msg, start_time, "LEECH (MODO ARIA2)"), 
                     loop
@@ -123,11 +122,16 @@ async def download_link(url, custom_name, msg, uid):
         'no_warnings': True,
         'progress_hooks': [ytdl_hook],
         'external_downloader': 'aria2c',
+        'check_formats': True,
+        'allow_unhandled_protocols': True,
+        'format': 'best',
         'external_downloader_args': [
-            '--quiet=true',          # SILENCIA la terminal para que los datos fluyan a Python
-            '--summary-interval=0',  # Reporte continuo para la barra
-            '-x', '16',              # 16 conexiones
-            '-s', '16',              # 16 partes
+            '--quiet=true',
+            '--summary-interval=1',
+            '--show-console-readout=false',
+            '--no-conf=true',
+            '-x', '16', 
+            '-s', '16', 
             '-k', '1M',
         ],
         'noprogress': False, 
@@ -136,7 +140,6 @@ async def download_link(url, custom_name, msg, uid):
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Ejecución en hilo separado para no bloquear el bot
             info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
             filename = ydl.prepare_filename(info)
 
@@ -145,7 +148,6 @@ async def download_link(url, custom_name, msg, uid):
             new_path = f"in_{uid}_{int(time.time())}_{custom_name}{ext}"
             os.rename(filename, new_path); filename = new_path
 
-        # Creamos un objeto falso para reutilizar la lógica de procesamiento
         class FakeMessage:
             def __init__(self, p, n):
                 self.video = type('obj', (object,), {'file_name': n})
