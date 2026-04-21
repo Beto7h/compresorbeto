@@ -70,13 +70,14 @@ def generate_thumbnail(video_path, uid):
         return thumb_path if os.path.exists(thumb_path) else None
     except: return None
 
-# --- 📊 BARRAS DE PROGRESO (Con manejo de FloodWait) ---
+# --- 📊 BARRAS DE PROGRESO (Con tu intervalo de 12 segundos) ---
 async def progress_bar(current, total, status_msg, start_time, action):
     uid = status_msg.chat.id
     if uid in cancel_flags: raise Exception("USER_ABORTED")
     now = time.time()
     last_update = last_update_time.get(uid, 0)
     
+    # Mantenemos tus 12 segundos originales para estabilidad máxima
     if (now - last_update) > 12 or current == total:
         last_update_time[uid] = now
         percentage = current * 100 / total
@@ -97,7 +98,7 @@ async def progress_bar(current, total, status_msg, start_time, action):
             await asyncio.sleep(e.value)
         except: pass
 
-# --- 📥 LÓGICA DE LEECH (Integración Aria2 Optimizada) ---
+# --- 📥 LÓGICA DE LEECH (Ajuste para Aria2) ---
 async def download_link(url, custom_name, msg, uid):
     last_update_time[uid] = 0
     start_time = time.time()
@@ -107,11 +108,13 @@ async def download_link(url, custom_name, msg, uid):
     def ytdl_hook(d):
         if uid in cancel_flags: raise Exception("USER_ABORTED")
         if d['status'] == 'downloading':
-            current = d.get('downloaded_bytes', 0)
+            # Captura bytes desde Aria2 incluso si vienen fragmentados
+            current = d.get('downloaded_bytes') or d.get('fragment_index', 0)
             total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-            if total > 0:
+            
+            if total and total > 0:
                 asyncio.run_coroutine_threadsafe(
-                    progress_bar(current, total, msg, start_time, "LEECH (MODO ARIA2)"), 
+                    progress_bar(current, total, msg, start_time, "LEECH (ARIA2)"), 
                     loop
                 )
 
@@ -130,12 +133,14 @@ async def download_link(url, custom_name, msg, uid):
             '--summary-interval=1',
             '--show-console-readout=false',
             '--no-conf=true',
+            '--console-log-level=error',
             '-x', '16', 
             '-s', '16', 
             '-k', '1M',
         ],
         'noprogress': False, 
         'retries': 10,
+        'logger': None,
     }
 
     try:
