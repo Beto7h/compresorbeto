@@ -5,7 +5,6 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotComman
 from config import Config
 
 # --- 📂 CONFIGURACIÓN DE RUTAS ---
-# En Docker, BASE_DIR será siempre /app
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # --- 🛰️ INICIALIZACIÓN DEL CLIENTE ---
@@ -18,7 +17,6 @@ app = Client(
 )
 
 # --- 🚀 INICIALIZACIÓN DE ARIA2P ---
-# Forzamos localhost porque Aria2 corre dentro del mismo contenedor
 aria2 = aria2p.API(aria2p.Client(host="http://localhost", port=6800, secret=""))
 
 # --- 🌍 VARIABLES GLOBALES ---
@@ -41,7 +39,6 @@ DEFAULT_SETTINGS = {
 
 # --- 🛠️ UTILIDADES ---
 def system_startup_cleanup():
-    """Limpia archivos residuales al arrancar el contenedor"""
     for f in os.listdir(BASE_DIR):
         if any(f.startswith(prefix) for prefix in ["in_", "out_", "thumb_"]):
             try: os.remove(os.path.join(BASE_DIR, f))
@@ -50,7 +47,6 @@ def system_startup_cleanup():
 def get_sys_stats_raw():
     cpu = psutil.cpu_percent()
     ram = psutil.virtual_memory().percent
-    # Usamos BASE_DIR para medir el disco del contenedor
     _, _, free = shutil.disk_usage(BASE_DIR)
     return f"⚙️ **CPU:** `{cpu}%` | 🧠 **RAM:** `{ram}%` | 💽 **Disco:** `{free // (1024**3)}GB`"
 
@@ -74,7 +70,29 @@ def generate_thumbnail(video_path, uid):
         return thumb_path if os.path.exists(thumb_path) else None
     except: return None
 
-# --- 📊 MONITOR ARIA2 ---
+# --- 📊 BARRA DE PROGRESO UNIVERSAL (CADA 12 SEG) ---
+async def progress_bar(current, total, msg, uid, type_label):
+    now = time.time()
+    if (now - last_update_time.get(uid, 0)) < 12:
+        return
+    last_update_time[uid] = now
+    
+    percentage = (current / total) * 100
+    bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
+    
+    tmp = (f"📂 **{type_label}**\n"
+           f"« {bar} »  **{percentage:.1f}%**\n\n"
+           f"📊 **DATOS:** `{current // (1024**2)}MB` / `{total // (1024**2)}MB`\n"
+           f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
+    
+    try:
+        await msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 CANCELAR", callback_data=f"abort_{uid}")]]))
+    except: pass
+
+    if uid in cancel_flags:
+        raise Exception("USER_ABORTED")
+
+# --- 📊 MONITOR ARIA2 (CADA 12 SEG) ---
 async def aria2_monitor(gid, msg, uid):
     last_update_time[uid] = 0
     while True:
@@ -84,7 +102,7 @@ async def aria2_monitor(gid, msg, uid):
             if download.is_removed: return False
             
             now = time.time()
-            if (now - last_update_time.get(uid, 0)) > 10:
+            if (now - last_update_time.get(uid, 0)) > 12:
                 last_update_time[uid] = now
                 percentage = download.progress
                 bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
@@ -100,8 +118,7 @@ async def aria2_monitor(gid, msg, uid):
             if uid in cancel_flags:
                 aria2.remove([download], force=True, files=True)
                 return False
-                
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
         except: break
     return False
 
@@ -109,38 +126,29 @@ async def aria2_monitor(gid, msg, uid):
 async def download_link(url, custom_name, msg, uid):
     cancel_flags.discard(uid)
     try:
-        # Añadimos la descarga a Aria2
         download = aria2.add_uris([url])
         gid = download.gid
         success = await aria2_monitor(gid, msg, uid)
         
         if success:
-            await asyncio.sleep(2) # Sincronización de buffer
+            await asyncio.sleep(2)
             download = aria2.get_download(gid)
-            
-            # CRÍTICO: Obtenemos el nombre base para ignorar rutas de Docker corruptas
             file_basename = os.path.basename(download.files[0].path)
-            # Construimos la ruta absoluta dentro de /app
             filename = os.path.join(BASE_DIR, file_basename)
             
-            # Si no aparece, lo buscamos recursivamente en /app
             if not os.path.exists(filename):
                 for root, _, files in os.walk(BASE_DIR):
                     if file_basename in files:
                         filename = os.path.join(root, file_basename)
                         break
             
-            if not os.path.exists(filename):
-                raise Exception(f"No encontré el archivo `{file_basename}` en el disco.")
+            if not os.path.exists(filename): raise Exception(f"No encontré el archivo `{file_basename}`")
 
-            # Renombrado y limpieza
             ext = os.path.splitext(filename)[1] or ".mp4"
             safe_name = re.sub(r'[\\/*?:"<>|]', "", custom_name) if custom_name else f"download_{int(time.time())}"
             new_path = os.path.join(BASE_DIR, f"in_{uid}_{safe_name}{ext}")
-            
             os.rename(filename, new_path)
             
-            # Preparamos el "mensaje falso" para que el procesador lo use
             class FakeMessage:
                 def __init__(self, p, n, msg_obj):
                     self.video = type('obj', (object,), {'file_name': n})
@@ -150,17 +158,15 @@ async def download_link(url, custom_name, msg, uid):
 
             if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
             user_settings[uid]['orig_msg'] = FakeMessage(new_path, os.path.basename(new_path), msg)
-            
             await msg.edit(f"✅ **Leech Finalizado**\n\n📄 `{os.path.basename(new_path)}`", reply_markup=get_main_menu(uid))
         else:
             await msg.edit("🛑 **Operación cancelada.**")
             cleanup(uid)
-            
     except Exception as e:
         await msg.edit(f"❌ **Error en Leech:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado.**")
         cleanup(uid)
 
-# --- 📊 MONITOR FFMPEG ---
+# --- 📊 MONITOR FFMPEG (CADA 12 SEG) ---
 async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     active_processes[uid] = proc
@@ -197,7 +203,6 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
             try: proc.terminate()
             except: pass
             raise Exception("USER_ABORTED")
-            
     await proc.wait()
 
 # --- ⚙️ PROCESAMIENTO ---
@@ -207,18 +212,20 @@ async def process_logic(uid, msg, settings, mode):
     ext_orig = os.path.splitext(raw_name)[1] or ".mp4"
     extension = ext_orig if settings.get('keep_format', True) else ".mp4"
     
-    # Rutas absolutas forzadas
     input_path = getattr(orig_msg, 'file_path', os.path.join(BASE_DIR, f"in_{uid}_{int(time.time())}{ext_orig}"))
     output_path = os.path.join(BASE_DIR, f"out_{uid}_{int(time.time())}{extension}")
 
     try:
-        # Si no tiene file_path, es una descarga directa de Telegram
+        # Descarga de Telegram si no es Leech
         if not os.path.exists(input_path):
-            await msg.edit("📥 **Descargando de Telegram...**")
-            input_path = await orig_msg.download(file_name=input_path)
+            last_update_time[uid] = 0
+            input_path = await orig_msg.download(
+                file_name=input_path,
+                progress=progress_bar,
+                progress_args=(msg, uid, "DESCARGANDO DE TG")
+            )
         
         duration = get_duration(input_path)
-        
         if mode == "audio_only":
             cmd = ["ffmpeg", "-y", "-i", input_path, "-vn", "-c:a", str(settings['audio_codec']), "-b:a", "192k", "-progress", "pipe:1", output_path]
             label = "EXTRAER AUDIO"
@@ -229,7 +236,7 @@ async def process_logic(uid, msg, settings, mode):
         await ffmpeg_monitor(uid, msg, cmd, duration, settings, label)
 
         if os.path.exists(output_path):
-            await msg.edit("📤 **Subiendo a Telegram...**")
+            last_update_time[uid] = 0
             await app.send_video(
                 chat_id=uid, 
                 video=output_path, 
@@ -237,9 +244,10 @@ async def process_logic(uid, msg, settings, mode):
                 thumb=generate_thumbnail(output_path, uid), 
                 file_name=raw_name, 
                 supports_streaming=True,
-                caption=f"✅ **Procesado con Éxito**\n\n📄 `{raw_name}`"
+                caption=f"✅ **Procesado con Éxito**\n\n📄 `{raw_name}`",
+                progress=progress_bar,
+                progress_args=(msg, uid, "SUBIENDO A TG")
             )
-        
         try: await msg.delete()
         except: pass
 
@@ -334,9 +342,11 @@ async def cb_handler(client, query):
     elif data == "mode_keep": user_settings[uid]['keep_format'] = True; changed = True
     elif data == "mode_mp4": user_settings[uid]['keep_format'] = False; changed = True
     elif data == "run_comp":
+        cancel_flags.discard(uid)
         await processing_queue.put((uid, query.message, user_settings[uid].copy(), "comp"))
         await query.message.edit("⏳ **En cola de compresión...**"); return
     elif data == "run_audio_only":
+        cancel_flags.discard(uid)
         await processing_queue.put((uid, query.message, user_settings[uid].copy(), "audio_only"))
         await query.message.edit("⏳ **En cola de audio...**"); return
     elif data.startswith("abort_"):
@@ -362,7 +372,7 @@ async def main_startup():
     system_startup_cleanup()
     await app.start()
     asyncio.create_task(worker())
-    print("🚀 Bot en Docker listo y escuchando.")
+    print("🚀 Bot en Docker listo con barra de 12 segundos.")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
