@@ -1,94 +1,89 @@
+---
 
-# 🚀 Compresor Élite - Guía de Despliegue en VPS
+## 🛠️ Guía de Preparación del Servidor (Docker & Compose)
 
-Este documento contiene los pasos exactos para instalar y ejecutar el bot en una VPS limpia desde cero, utilizando **Docker** para evitar errores de rutas o dependencias.
+### 1. Verificar si ya tienes Docker instalado
+Antes de instalar nada, corre estos comandos. Si te devuelven una versión, ya puedes saltar al paso de despliegue.
 
-## 📋 Requisitos Previos
-* Una VPS con Ubuntu/Debian.
-* Token de Bot de Telegram, API ID y API HASH (configurados en `config.py`).
+* **Para Docker:** `docker --version`
+* **Para Docker Compose:** `docker-compose --version`
+
+> **Nota:** Si te sale un mensaje como `command not found`, entonces procede con la instalación.
 
 ---
 
-## 🛠️ Paso 1: Instalación del Entorno (Solo una vez)
-Si la VPS es nueva, Docker no estará instalado. Ejecuta esto para preparar el sistema:
+### 2. Instalación de Docker (Ubuntu/Debian)
+Copia y pega este bloque de comandos para instalar el motor de Docker:
 
 ```bash
-# 1. Actualizar el sistema
-apt update && apt upgrade -y
+# Actualizar el sistema
+sudo apt update && sudo apt upgrade -y
 
-# 2. Instalar Docker
-curl -fsSL https://get.docker.com -o get-docker.sh
-sh get-docker.sh
+# Instalar dependencias necesarias
+sudo apt install apt-transport-https ca-certificates curl software-properties-common -y
 
-# 3. Instalar Docker Compose
-apt install docker-compose -y
+# Añadir la llave oficial de Docker
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 
-# 4. Activar el servicio de Docker
-systemctl start docker
-systemctl enable docker
+# Añadir el repositorio
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Instalar Docker
+sudo apt update
+sudo apt install docker-ce docker-ce-cli containerd.io -y
+
+# Iniciar y habilitar Docker
+sudo systemctl start docker
+sudo systemctl enable docker
 ```
 
 ---
 
-## 📂 Paso 2: Estructura de Archivos
-Asegúrate de que tu carpeta (ej. `/root/compresorbeto`) tenga estos archivos:
-
-1.  **`main.py`**: El código del bot (versión híbrida/Docker).
-2.  **`config.py`**: Tus credenciales de Telegram.
-3.  **`Dockerfile`**: Configuración del contenedor (Python 3.11 + FFmpeg + Aria2).
-4.  **`run_bot.sh`**: Script que arranca Aria2 y el Bot.
-5.  **`docker-compose.yml`**: Orquestador de la aplicación.
-6.  **`requirements.txt`**: Librerías de Python.
-
----
-
-## 🚀 Paso 3: Despliegue del Bot
-Una vez tengas los archivos en la carpeta, ejecuta:
+### 3. Instalación de Docker Compose
+Docker Compose es el que nos permite usar el archivo `docker-compose.yml`.
 
 ```bash
-# Entrar a la carpeta
-cd /root/compresorbeto
+# Descargar la última versión estable
+sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
 
-# Dar permisos al script de arranque
-chmod +x run_bot.sh
+# Dar permisos de ejecución
+sudo chmod +x /usr/local/bin/docker-compose
 
-# Construir y lanzar el contenedor en segundo plano
-docker-compose up -d --build
+# Verificar instalación
+docker-compose --version
 ```
 
 ---
 
-## 📊 Paso 4: Comandos de Gestión
-Para monitorear el bot una vez esté corriendo:
+### 4. Despliegue del Bot en el nuevo VPS
+Una vez que tienes Docker listo, estos son los pasos para subir tu bot:
 
-* **Ver logs en tiempo real** (Ideal para ver errores de descarga o FFmpeg):
-  ```bash
-  docker logs -f compresor_beto_cont
-  ```
-* **Detener el bot**:
-  ```bash
-  docker-compose down
-  ```
-* **Reiniciar el bot**:
-  ```bash
-  docker-compose restart
-  ```
+1.  **Crea la carpeta de tu proyecto:**
+    ```bash
+    mkdir compresorbeto && cd compresorbeto
+    ```
+2.  **Sube tus archivos** (`main.py`, `config.py`, `Dockerfile`, `docker-compose.yml`, `requirements.txt`).
+3.  **Lanza el bot:**
+    ```bash
+    docker-compose up -d --build
+    ```
 
 ---
 
-## 💡 Solución de Problemas Comunes
+### 5. Comandos de Supervivencia (Mantenimiento)
+Si el bot se detiene o el disco se llena (como nos pasó antes), usa estos comandos:
 
-### 1. Error de Conexión (Connection Refused)
-Si al ejecutar comandos de Docker recibes un error de conexión, el motor de Docker está apagado.
-* **Solución**: `systemctl start docker`.
-
-### 2. Archivo no encontrado tras descargar (Aria2)
-Si el bot dice que el archivo no está en el disco, es porque la ruta de Aria2 y la del Bot no coinciden.
-* **Solución**: Asegúrate de que el `run_bot.sh` tenga el parámetro `--dir=/app` y que el `docker-compose.yml` tenga el volumen `- .:/app` correctamente mapeado.
-
-### 3. Error de ruta `/usr/src/app`
-Este error ocurre cuando intentas ejecutar el bot fuera de Docker pero con configuración de Docker.
-* **Solución**: Ejecuta siempre mediante `docker-compose up`. Si prefieres usar `screen`, asegúrate de que el código use rutas dinámicas con `BASE_DIR`.
+| Objetivo | Comando |
+| :--- | :--- |
+| **¿Está vivo el bot?** | `docker ps` |
+| **¿Qué errores hay?** | `docker logs -f compresor_beto_cont` |
+| **Limpiar basura (Gigas)** | `docker system prune -a --volumes -f` |
+| **Reiniciar todo** | `docker-compose restart` |
+| **Ver espacio en disco** | `df -h` |
 
 ---
-*Guía generada para el proyecto CompresorBeto.*
+
+### 💡 Un último consejo de "pro"
+Si usas un VPS con pocos recursos, Docker a veces puede consumir mucha RAM al construir la imagen. Si ves que se queda "pegado" al instalar, asegúrate de que no tienes otros procesos pesados corriendo con `top` o `htop`.
+
+¡Con esto ya eres oficialmente el administrador de tu propia infraestructura! ¿Listo para conquistar otro VPS?
