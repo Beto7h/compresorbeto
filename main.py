@@ -37,6 +37,44 @@ DEFAULT_SETTINGS = {
     'keep_format': True
 }
 
+# --- 📊 LOGGER PARA YT-DLP (BARRA DE PROGRESO) ---
+class YTLProgressLogger:
+    def __init__(self, msg, uid, loop):
+        self.msg = msg
+        self.uid = uid
+        self.loop = loop
+
+    def debug(self, msg):
+        if msg.startswith('[download]'):
+            self.parse_progress(msg)
+
+    def info(self, msg): pass
+    def warning(self, msg): pass
+    def error(self, msg): pass
+
+    def parse_progress(self, msg):
+        percent_match = re.search(r'(\d+\.\d+)%', msg)
+        if percent_match:
+            percent = float(percent_match.group(1))
+            asyncio.run_coroutine_threadsafe(self.update_ytl_ui(percent, msg), self.loop)
+
+    async def update_ytl_ui(self, percent, raw_msg):
+        now = time.time()
+        if (now - last_update_time.get(self.uid, 0)) < 12: return
+        last_update_time[self.uid] = now
+
+        bar = '█' * int(12 * percent // 100) + '░' * (12 - int(12 * percent // 100))
+        speed = "Calculando..."
+        eta = "..."
+        if "at" in raw_msg: speed = raw_msg.split("at")[1].split("ETA")[0].strip()
+        if "ETA" in raw_msg: eta = raw_msg.split("ETA")[1].strip()
+
+        tmp = (f"📥 **DESCARGA YTL**\n« {bar} »  **{percent:.1f}%**\n\n"
+               f"🚀 **VEL:** `{speed}` | ⏳ **ETA:** `{eta}`\n\n"
+               f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
+        try: await self.msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 CANCELAR", callback_data=f"abort_{self.uid}")]]))
+        except: pass
+
 # --- 🛠️ UTILIDADES ---
 def system_startup_cleanup():
     for f in os.listdir(BASE_DIR):
@@ -157,27 +195,28 @@ async def download_link(url, custom_name, msg, uid):
         await msg.edit(f"❌ **Error en Leech:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado.**")
         cleanup(uid)
 
-# --- 📥 NUEVA LÓGICA DE YTL (YT-DLP) ---
+# --- 📥 NUEVA LÓGICA DE YTL (YT-DLP) MEJORADA PARA GOFILE ---
 async def download_ytl(url, custom_name, msg, uid):
     cancel_flags.discard(uid)
+    loop = asyncio.get_event_loop()
     try:
-        # Preparamos el nombre seguro
         safe_name = re.sub(r'[\\/*?:"<>|]', "", custom_name) if custom_name else f"ytl_{int(time.time())}"
         output_template = os.path.join(BASE_DIR, f"in_{uid}_{safe_name}.%(ext)s")
 
-        # Configuración de yt-dlp
         ydl_opts = {
             'format': 'bestvideo+bestaudio/best',
             'outtmpl': output_template,
             'quiet': True,
             'no_warnings': True,
+            'nocheckcertificate': True,
+            'addheader': [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')],
+            'logger': YTLProgressLogger(msg, uid, loop),
         }
 
-        await msg.edit(f"⏳ **yt-dlp:** Analizando y descargando...\n(Drive/GoFile/YT/etc)")
+        await msg.edit(f"⏳ **YTL:** Iniciando descarga...")
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Ejecutamos en un hilo para no bloquear asyncio
-            info = await asyncio.get_event_loop().run_in_executor(None, lambda: ydl.extract_info(url, download=True))
+            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
             filename = ydl.prepare_filename(info)
 
         if os.path.exists(filename):
@@ -356,7 +395,7 @@ async def ytl_handler(client, message):
     if not text: return await message.reply("⚠️ Uso: `/ytl [url] -n [nombre]`")
     url = text.split(" -n ")[0].strip()
     name = text.split(" -n ")[1].strip() if " -n " in text else None
-    s_msg = await message.reply("⏳ **yt-dlp:** Preparando motor...")
+    s_msg = await message.reply("⏳ **YTL:** Preparando descarga...")
     await download_ytl(url, name, s_msg, uid)
 
 @app.on_message((filters.video | filters.document) & filters.private)
@@ -398,29 +437,4 @@ async def cb_handler(client, query):
     elif data.startswith("abort_"):
         cancel_flags.add(uid)
         if uid in active_processes:
-            try: active_processes[uid].terminate()
-            except: pass
-        return
-
-    if changed or "menu_" in data:
-        text = f"🛠️ **Ajustes de Video**\n\n{get_config_summary(uid)}" if "settings" in data or "set_" in data else f"🎬 **Menú Principal**\n\n{get_config_summary(uid)}"
-        markup = get_settings_menu(uid) if "settings" in data or "set_" in data else get_main_menu(uid)
-        try: await query.message.edit(text, reply_markup=markup)
-        except: pass
-
-async def worker():
-    while True:
-        uid, msg, settings, mode = await processing_queue.get()
-        await process_logic(uid, msg, settings, mode)
-        processing_queue.task_done()
-
-async def main_startup():
-    system_startup_cleanup()
-    await app.start()
-    asyncio.create_task(worker())
-    print("🚀 Bot listo con Aria2 + yt-dlp (/ytl)")
-    await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    app.run(main_startup())
-            
+            try: active_process
