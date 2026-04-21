@@ -31,10 +31,9 @@ DEFAULT_SETTINGS = {
 
 # --- 🛠️ UTILIDADES DE SISTEMA ---
 def clean_file_name(name):
-    """Limpia profundamente el nombre para evitar errores en Linux/FFmpeg"""
+    """Limpia el nombre para procesos internos de FFmpeg"""
     if not name: return "video_procesado"
     name_part = os.path.splitext(name)[0]
-    # Solo permitimos letras y números para el nombre del archivo en disco
     clean = re.sub(r'[^a-zA-Z0-9]', '_', name_part)
     return re.sub(r'_+', '_', clean).strip('_')
 
@@ -51,6 +50,7 @@ def get_eta(current, total, speed):
     return time.strftime('%H:%M:%S', time.gmtime(remaining_time))
 
 def cleanup(uid):
+    """Limpia archivos temporales del usuario específico"""
     for f in os.listdir("."):
         if f"in_{uid}" in f or f"out_{uid}" in f or f"thumb_{uid}" in f:
             try: os.remove(f)
@@ -181,7 +181,7 @@ async def process_logic(uid, msg, settings, mode):
     extension = os.path.splitext(raw_name)[1] if settings.get('keep_format', True) else ".mp4"
     if not extension: extension = ".mp4"
     
-    # RUTAS SEGURAS (Nombre genérico para el servidor, evita fallos de caracteres)
+    # RUTAS SEGURAS (Nombres genéricos en disco para evitar errores de FFmpeg)
     base_dir = os.path.dirname(os.path.abspath(__file__))
     input_path = os.path.join(base_dir, f"in_{uid}_{int(time.time())}{os.path.splitext(raw_name)[1]}")
     output_path = os.path.join(base_dir, f"out_{uid}_{int(time.time())}{extension}")
@@ -227,7 +227,7 @@ async def process_logic(uid, msg, settings, mode):
             video=output_path, 
             duration=int(get_duration(output_path)), 
             thumb=thumb, 
-            file_name=raw_name, # ESTO MANTIENE EL NOMBRE ORIGINAL AL RECIBIRLO
+            file_name=raw_name, # Preserva el nombre original
             supports_streaming=True, 
             progress=progress_bar, progress_args=(msg, time.time(), "SUBIENDO"), 
             caption=f"✅ **Proceso Completado**\n\n📄 `{raw_name}`"
