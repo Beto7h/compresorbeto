@@ -18,6 +18,9 @@ user_settings = {}
 active_processes = {} 
 cancel_flags = set()
 
+# Diccionario para rastrear el tiempo de la última actualización por usuario
+last_update_time = {}
+
 DEFAULT_SETTINGS = {
     'crf': 24, 
     'preset': 'medium', 
@@ -119,21 +122,28 @@ def get_settings_menu(uid):
         [InlineKeyboardButton("⬅️ VOLVER AL INICIO", callback_data="menu_main")]
     ])
 
-# --- 📊 BARRAS DE PROGRESO ---
+# --- 📊 BARRAS DE PROGRESO OPTIMIZADAS ---
 async def progress_bar(current, total, status_msg, start_time, action):
     uid = status_msg.chat.id
     if uid in cancel_flags: raise Exception("USER_ABORTED")
+    
     now = time.time()
-    diff = now - start_time
-    if round(diff % 4.00) == 0 or current == total:
+    # Solo actualiza si han pasado 15 segundos o si es el final (100%)
+    last_update = last_update_time.get(uid, 0)
+    
+    if (now - last_update) > 15 or current == total:
+        last_update_time[uid] = now
         percentage = current * 100 / total
+        diff = now - start_time
         speed = current / diff if diff > 0 else 0
         eta = get_eta(current, total, speed)
         bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
+        
         tmp = (f"📥 **{action}**\n« {bar} »  **{percentage:.1f}%**\n\n"
                f"📊 **DATOS:** `{current/(1024**2):.1f}` / `{total/(1024**2):.1f}` MB\n"
                f"🚀 **VEL:** `{speed/(1024**2):.2f}` MB/s | ⏳ **ETA:** `{eta}`\n\n"
                f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
+        
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]])
         try: await status_msg.edit(tmp, reply_markup=kb)
         except: pass
@@ -143,33 +153,42 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
     active_processes[uid] = proc
     start_time = time.time()
     last_update = 0
+    
     while True:
         line = await proc.stdout.readline()
         if not line: break
         text = line.decode("utf-8")
+        
         if "out_time_ms=" in text:
             try:
                 ms = int(text.split("=")[1])
                 current_time_sec = ms / 1000000
-                if duration > 0 and (time.time() - last_update) > 4:
+                now = time.time()
+                
+                # Monitor de FFmpeg también a 15 segundos para no saturar
+                if duration > 0 and (now - last_update) > 15:
                     percentage = min((current_time_sec / duration) * 100, 100)
-                    elapsed = time.time() - start_time
+                    elapsed = now - start_time
                     speed_factor = current_time_sec / elapsed if elapsed > 0 else 0
                     eta_sec = (duration - current_time_sec) / speed_factor if speed_factor > 0 else 0
                     eta = time.strftime('%H:%M:%S', time.gmtime(eta_sec))
                     bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
+                    
                     tmp = (f"⚙️ **{mode_label}**\n« {bar} »  **{percentage:.1f}%**\n\n"
                            f"⚡ **PRESET:** `{settings['v_label']}` | 🚀 **V-ETA:** `{speed_factor:.2f}x`\n"
                            f"⏳ **RESTANTE:** `{eta}`\n\n"
                            f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
+                    
                     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]])
                     try: await msg.edit(tmp, reply_markup=kb)
                     except: pass
-                    last_update = time.time()
+                    last_update = now
             except: pass
+            
         if uid in cancel_flags:
             proc.terminate()
             raise Exception("USER_ABORTED")
+            
     await proc.wait()
 
 # --- ⚙️ LÓGICA DE PROCESAMIENTO ---
@@ -177,16 +196,18 @@ async def process_logic(uid, msg, settings, mode):
     orig_msg = settings['orig_msg']
     raw_name = orig_msg.video.file_name if orig_msg.video else (orig_msg.document.file_name if orig_msg.document else "video.mp4")
     
-    # Nombre de salida dinámico basado en la preferencia del usuario
     extension = os.path.splitext(raw_name)[1] if settings.get('keep_format', True) else ".mp4"
     if not extension: extension = ".mp4"
     
-    # RUTAS SEGURAS (Nombres genéricos en disco para evitar errores de FFmpeg)
     base_dir = os.path.dirname(os.path.abspath(__file__))
+    # Usamos marcas de tiempo para evitar conflictos de nombres
     input_path = os.path.join(base_dir, f"in_{uid}_{int(time.time())}{os.path.splitext(raw_name)[1]}")
     output_path = os.path.join(base_dir, f"out_{uid}_{int(time.time())}{extension}")
 
     try:
+        # Reset del tiempo de progreso para este proceso
+        last_update_time[uid] = 0
+        
         await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "DESCARGANDO"))
         
         if not os.path.exists(input_path):
@@ -222,12 +243,15 @@ async def process_logic(uid, msg, settings, mode):
 
         thumb = generate_thumbnail(output_path, uid)
         
+        # Reset del tiempo para la subida
+        last_update_time[uid] = 0
+        
         await app.send_video(
             chat_id=uid, 
             video=output_path, 
             duration=int(get_duration(output_path)), 
             thumb=thumb, 
-            file_name=raw_name, # Preserva el nombre original
+            file_name=raw_name, 
             supports_streaming=True, 
             progress=progress_bar, progress_args=(msg, time.time(), "SUBIENDO"), 
             caption=f"✅ **Proceso Completado**\n\n📄 `{raw_name}`"
@@ -241,6 +265,7 @@ async def process_logic(uid, msg, settings, mode):
     finally:
         active_processes.pop(uid, None)
         if uid in cancel_flags: cancel_flags.remove(uid)
+        last_update_time.pop(uid, None)
         cleanup(uid)
 
 async def worker():
