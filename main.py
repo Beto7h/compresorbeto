@@ -62,14 +62,15 @@ def generate_thumbnail(video_path, uid):
         return thumb_path if os.path.exists(thumb_path) else None
     except: return None
 
-# --- 📊 BARRAS DE PROGRESO ---
+# --- 📊 BARRAS DE PROGRESO (Optimización de latencia) ---
 async def progress_bar(current, total, status_msg, start_time, action):
     uid = status_msg.chat.id
     if uid in cancel_flags: raise Exception("USER_ABORTED")
     now = time.time()
     last_update = last_update_time.get(uid, 0)
     
-    if (now - last_update) > 15 or current == total:
+    # Umbral de 12s para evitar FloodWait de Telegram pero mantener fluidez
+    if (now - last_update) > 12 or current == total:
         last_update_time[uid] = now
         percentage = current * 100 / total
         speed = current / (now - start_time) if (now - start_time) > 0 else 0
@@ -83,7 +84,7 @@ async def progress_bar(current, total, status_msg, start_time, action):
         try: await status_msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]]))
         except: pass
 
-# --- 📥 LÓGICA DE LEECH CON PROGRESO Y VARIABLE P CORREGIDA ---
+# --- 📥 LÓGICA DE LEECH (Máxima velocidad multihilo) ---
 async def download_link(url, custom_name, msg, uid):
     last_update_time[uid] = 0
     start_time = time.time()
@@ -94,15 +95,19 @@ async def download_link(url, custom_name, msg, uid):
             current = d.get('downloaded_bytes', 0)
             total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
             if total > 0:
-                asyncio.run_coroutine_threadsafe(
-                    progress_bar(current, total, msg, start_time, "LEECH (DESCARGANDO)"), 
-                    loop
-                )
+                asyncio.run_coroutine_threadsafe(progress_bar(current, total, msg, start_time, "LEECH (DESCARGANDO)"), loop)
 
+    # Configuración de potencia extrema para VPS
     ydl_opts = {
         'outtmpl': f"in_{uid}_{int(time.time())}_%(title)s.%(ext)s",
         'noplaylist': True, 'quiet': True, 'no_warnings': True,
         'progress_hooks': [ytdl_hook],
+        # MEJORAS DE VELOCIDAD:
+        'concurrent_fragment_downloads': 10,  # 10 hilos simultáneos
+        'external_downloader': 'aria2c',      # Requiere apt install aria2
+        'external_downloader_args': ['-x', '16', '-s', '16', '-k', '1M'],
+        'buffersize': 1024 * 256,
+        'retries': 10,
     }
 
     try:
@@ -116,24 +121,19 @@ async def download_link(url, custom_name, msg, uid):
             os.rename(filename, new_path)
             filename = new_path
 
-        # CORRECCIÓN DE VARIABLE P AQUÍ
         class FakeMessage:
             def __init__(self, p, n):
                 self.video = type('obj', (object,), {'file_name': n})
-                self.document = None
-                self.chat = msg.chat
-                self.from_user = msg.from_user
-                self.file_path = p # Guardamos la ruta 'p' en la instancia
-
-            async def download(self, **kwargs): 
-                return self.file_path # Devolvemos la ruta guardada
+                self.document = None; self.chat = msg.chat; self.from_user = msg.from_user
+                self.file_path = p
+            async def download(self, **kwargs): return self.file_path
 
         if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
         user_settings[uid]['orig_msg'] = FakeMessage(filename, os.path.basename(filename))
         
         await msg.edit(f"✅ **Leech Completado**\n\n📄 `{os.path.basename(filename)}`", reply_markup=get_main_menu(uid))
     except Exception as e:
-        await msg.edit(f"❌ **Error en Leech:** `{e}`")
+        await msg.edit(f"❌ **Error en Leech:** `{str(e)}`")
 
 # --- ⚙️ FFMPEG MONITOR ---
 async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
@@ -150,7 +150,7 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
                 ms = int(text.split("=")[1])
                 current_time_sec = ms / 1000000
                 now = time.time()
-                if duration > 0 and (now - last_update) > 15:
+                if duration > 0 and (now - last_update) > 12:
                     percentage = min((current_time_sec / duration) * 100, 100)
                     speed_factor = current_time_sec / (now - start_time) if (now - start_time) > 0 else 0
                     eta_sec = (duration - current_time_sec) / speed_factor if speed_factor > 0 else 0
@@ -202,12 +202,10 @@ async def process_logic(uid, msg, settings, mode):
 def get_config_summary(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
     f_label = "Original" if s.get('keep_format', True) else "MP4"
-    return (f"📝 **RESUMEN DE CONFIGURACIÓN:**\n"
+    return (f"📝 **CONFIGURACIÓN ACTUAL:**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💎 **Calidad:** `{s['q_label']}`\n"
-            f"📏 **Resolución:** `{s['res']}p`\n"
-            f"⚡ **Velocidad:** `{s['v_label']}`\n"
-            f"🎵 **Audio:** `{s['a_label']}` | 📦 **Formato:** `{f_label}`\n"
+            f"💎 **Calidad:** `{s['q_label']}` | 📏 **Res:** `{s['res']}p`\n"
+            f"⚡ **Preset:** `{s['v_label']}` | 🎵 **Audio:** `{s['a_label']}`\n"
             f"━━━━━━━━━━━━━━━━━━━━")
 
 def get_main_menu(uid):
@@ -215,32 +213,31 @@ def get_main_menu(uid):
     keep_v = "✅ " if s.get('keep_format', True) else ""
     force_v = "✅ " if not s.get('keep_format', True) else ""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎞️ AJUSTES", callback_data="menu_settings")],
+        [InlineKeyboardButton("🎞️ AJUSTES AVANZADOS", callback_data="menu_settings")],
         [InlineKeyboardButton("🚀 INICIAR COMPRESIÓN", callback_data="run_comp")],
-        [InlineKeyboardButton("─── AUDIO ───", callback_data="n")],
         [InlineKeyboardButton(f"{'✅ ' if s.get('a_label')=='MP3' else ''}MP3", callback_data="set_aud_libmp3lame_MP3"),
          InlineKeyboardButton(f"{'✅ ' if s.get('a_label')=='AAC' else ''}AAC", callback_data="set_aud_aac_AAC")],
         [InlineKeyboardButton(f"{keep_v}ORIGINAL", callback_data="mode_keep"),
          InlineKeyboardButton(f"{force_v}MP4", callback_data="mode_mp4")],
-        [InlineKeyboardButton("⚡ SOLO AUDIO", callback_data="run_audio_only")]
+        [InlineKeyboardButton("⚡ SOLO EXTRAER AUDIO", callback_data="run_audio_only")]
     ])
 
 def get_settings_menu(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💎 CALIDAD", callback_data="n")],
+        [InlineKeyboardButton("── CALIDAD ──", callback_data="n")],
         [InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Baja' else ''}Baja", callback_data="set_q_30"),
          InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Estándar' else ''}Estándar", callback_data="set_q_24"),
          InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Súper' else ''}Súper", callback_data="set_q_18")],
-        [InlineKeyboardButton("📏 RESOLUCIÓN", callback_data="n")],
+        [InlineKeyboardButton("── RESOLUCIÓN ──", callback_data="n")],
         [InlineKeyboardButton(f"{'✅ ' if s.get('res')=='480' else ''}480p", callback_data="set_r_480"),
          InlineKeyboardButton(f"{'✅ ' if s.get('res')=='720' else ''}720p", callback_data="set_r_720"),
          InlineKeyboardButton(f"{'✅ ' if s.get('res')=='1080' else ''}1080p", callback_data="set_r_1080")],
-        [InlineKeyboardButton("⚡ PRESET", callback_data="n")],
+        [InlineKeyboardButton("── VELOCIDAD (PRESET) ──", callback_data="n")],
         [InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Lento' else ''}Lento", callback_data="set_v_slower_Lento"),
          InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Medio' else ''}Medio", callback_data="set_v_medium_Medio"),
          InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Ultra' else ''}Ultra", callback_data="set_v_ultrafast_Ultra")],
-        [InlineKeyboardButton("⬅️ VOLVER", callback_data="menu_main")]
+        [InlineKeyboardButton("⬅️ VOLVER AL INICIO", callback_data="menu_main")]
     ])
 
 # --- 🛰️ MANEJADORES ---
@@ -248,16 +245,16 @@ def get_settings_menu(uid):
 async def start_cmd(client, message):
     uid = message.from_user.id
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
-    await message.reply(f"✨ **Bienvenido**\n\n{get_sys_stats_raw()}")
+    await message.reply(f"✨ **Compresor Élite Activo**\n\n{get_sys_stats_raw()}")
 
 @app.on_message(filters.command("leech") & filters.private)
 async def leech_handler(client, message):
     uid = message.from_user.id
     text = message.text.replace("/leech", "").strip()
-    if not text: return await message.reply("⚠️ `/leech [url] -n [nombre]`")
+    if not text: return await message.reply("⚠️ Uso: `/leech [url] -n [nombre]`")
     url = text.split(" -n ")[0].strip()
     name = text.split(" -n ")[1].strip() if " -n " in text else None
-    s_msg = await message.reply("⏳ **Iniciando Leech...**")
+    s_msg = await message.reply("⏳ **Analizando enlace...**")
     await download_link(url, name, s_msg, uid)
 
 @app.on_message((filters.video | filters.document) & filters.private)
@@ -265,38 +262,57 @@ async def handle_input(client, message):
     uid = message.from_user.id
     user_settings[uid] = DEFAULT_SETTINGS.copy()
     user_settings[uid]['orig_msg'] = message
-    await message.reply(f"🎬 **Archivo recibido**\n\n{get_config_summary(uid)}", reply_markup=get_main_menu(uid))
+    await message.reply(f"🎬 **Archivo listo**\n\n{get_config_summary(uid)}", reply_markup=get_main_menu(uid))
 
 @app.on_callback_query()
 async def cb_handler(client, query):
     uid, data = query.from_user.id, query.data
+    # ⚡ OPTIMIZACIÓN: Respuesta inmediata al servidor de Telegram
+    await query.answer()
+    
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
 
+    changed = False
     if data.startswith("set_q_"):
         val = data.split("_")[2]
         user_settings[uid]['crf'] = val
         user_settings[uid]['q_label'] = {"30":"Baja", "24":"Estándar", "18":"Súper"}[val]
-    elif data.startswith("set_r_"): user_settings[uid]['res'] = data.split("_")[2]
+        changed = True
+    elif data.startswith("set_r_"): 
+        user_settings[uid]['res'] = data.split("_")[2]
+        changed = True
     elif data.startswith("set_v_"):
         parts = data.split("_")
         user_settings[uid]['preset'], user_settings[uid]['v_label'] = parts[2], parts[3]
+        changed = True
     elif data.startswith("set_aud_"):
         parts = data.split("_")
         user_settings[uid]['audio_codec'], user_settings[uid]['a_label'] = parts[2], parts[3]
-    elif data == "mode_keep": user_settings[uid]['keep_format'] = True
-    elif data == "mode_mp4": user_settings[uid]['keep_format'] = False
+        changed = True
+    elif data == "mode_keep": 
+        user_settings[uid]['keep_format'] = True
+        changed = True
+    elif data == "mode_mp4": 
+        user_settings[uid]['keep_format'] = False
+        changed = True
+    
     elif data == "run_comp":
         await processing_queue.put((uid, query.message, user_settings[uid].copy(), "comp"))
-        await query.message.edit("⏳ En cola para compresión...")
+        await query.message.edit("⏳ **Añadido a la cola de compresión...**")
+        return
     elif data == "run_audio_only":
         await processing_queue.put((uid, query.message, user_settings[uid].copy(), "audio_only"))
-        await query.message.edit("⏳ En cola para audio...")
+        await query.message.edit("⏳ **Añadido a la cola de extracción...**")
+        return
     elif data.startswith("abort_"):
         cancel_flags.add(uid)
         if uid in active_processes: active_processes[uid].terminate()
-    else:
-        text = f"🛠️ **Ajustes**\n\n{get_config_summary(uid)}" if "set_" in data or "settings" in data else f"🎬 **Menú**\n\n{get_config_summary(uid)}"
-        markup = get_settings_menu(uid) if "set_" in data or "settings" in data else get_main_menu(uid)
+        return
+
+    # 🚀 Actualización de UI solo si hubo cambios o navegación de menús
+    if changed or "menu_" in data:
+        text = f"🛠️ **Ajustes de Video**\n\n{get_config_summary(uid)}" if "settings" in data or "set_" in data else f"🎬 **Menú Principal**\n\n{get_config_summary(uid)}"
+        markup = get_settings_menu(uid) if "settings" in data or "set_" in data else get_main_menu(uid)
         try: await query.message.edit(text, reply_markup=markup)
         except: pass
 
@@ -308,6 +324,6 @@ async def worker():
 
 async def main_startup():
     await app.start(); asyncio.create_task(worker())
-    print("🔥 Bot iniciado"); await asyncio.Event().wait()
+    print("🔥 Bot Optimizado en línea"); await asyncio.Event().wait()
 
 if __name__ == "__main__": app.run(main_startup())
