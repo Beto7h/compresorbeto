@@ -62,14 +62,14 @@ def generate_thumbnail(video_path, uid):
         return thumb_path if os.path.exists(thumb_path) else None
     except: return None
 
-# --- 📊 BARRAS DE PROGRESO (Optimización de latencia) ---
+# --- 📊 BARRAS DE PROGRESO (Actualización fija a 12s) ---
 async def progress_bar(current, total, status_msg, start_time, action):
     uid = status_msg.chat.id
     if uid in cancel_flags: raise Exception("USER_ABORTED")
     now = time.time()
     last_update = last_update_time.get(uid, 0)
     
-    # Umbral de 12s para evitar FloodWait de Telegram pero mantener fluidez
+    # Mantenemos estrictamente los 12 segundos solicitados
     if (now - last_update) > 12 or current == total:
         last_update_time[uid] = now
         percentage = current * 100 / total
@@ -81,37 +81,55 @@ async def progress_bar(current, total, status_msg, start_time, action):
                f"📊 **DATOS:** `{current/(1024**2):.1f}` / `{total/(1024**2):.1f}` MB\n"
                f"🚀 **VEL:** `{speed/(1024**2):.2f}` MB/s | ⏳ **ETA:** `{eta}`\n\n"
                f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
-        try: await status_msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]]))
+        try: 
+            # Botón de cancelación integrado en la barra
+            await status_msg.edit(
+                tmp, 
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 CANCELAR", callback_data=f"abort_{uid}")]])
+            )
         except: pass
 
-# --- 📥 LÓGICA DE LEECH (Máxima velocidad multihilo) ---
+# --- 📥 LÓGICA DE LEECH (Integración Aria2 + Cancelar) ---
 async def download_link(url, custom_name, msg, uid):
     last_update_time[uid] = 0
     start_time = time.time()
     loop = asyncio.get_running_loop()
+    cancel_flags.discard(uid) # Reset de flag antes de iniciar
 
     def ytdl_hook(d):
+        if uid in cancel_flags:
+            raise Exception("USER_ABORTED")
+            
         if d['status'] == 'downloading':
             current = d.get('downloaded_bytes', 0)
             total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
             if total > 0:
-                asyncio.run_coroutine_threadsafe(progress_bar(current, total, msg, start_time, "LEECH (DESCARGANDO)"), loop)
+                asyncio.run_coroutine_threadsafe(
+                    progress_bar(current, total, msg, start_time, "LEECH (MODO ARIA2)"), 
+                    loop
+                )
 
-    # Configuración de potencia extrema para VPS
     ydl_opts = {
         'outtmpl': f"in_{uid}_{int(time.time())}_%(title)s.%(ext)s",
-        'noplaylist': True, 'quiet': True, 'no_warnings': True,
+        'noplaylist': True, 
+        'quiet': True, 
+        'no_warnings': True,
         'progress_hooks': [ytdl_hook],
-        # MEJORAS DE VELOCIDAD:
-        'concurrent_fragment_downloads': 10,  # 10 hilos simultáneos
-        'external_downloader': 'aria2c',      # Requiere apt install aria2
-        'external_downloader_args': ['-x', '16', '-s', '16', '-k', '1M'],
-        'buffersize': 1024 * 256,
+        # --- POTENCIA ARIA2 ---
+        'external_downloader': 'aria2c',
+        'external_downloader_args': [
+            '-x', '16', 
+            '-s', '16', 
+            '-k', '1M',
+            '--summary-interval=0', # Clave para que yt-dlp recupere el progreso
+        ],
+        'noprogress': False, 
         'retries': 10,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Ejecución en executor para no bloquear el bot
             info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
             filename = ydl.prepare_filename(info)
 
@@ -131,9 +149,13 @@ async def download_link(url, custom_name, msg, uid):
         if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
         user_settings[uid]['orig_msg'] = FakeMessage(filename, os.path.basename(filename))
         
-        await msg.edit(f"✅ **Leech Completado**\n\n📄 `{os.path.basename(filename)}`", reply_markup=get_main_menu(uid))
+        await msg.edit(f"✅ **Leech Aria2 Completado**\n\n📄 `{os.path.basename(filename)}`", reply_markup=get_main_menu(uid))
     except Exception as e:
-        await msg.edit(f"❌ **Error en Leech:** `{str(e)}`")
+        if "USER_ABORTED" in str(e):
+            await msg.edit("🛑 **Descarga cancelada.**")
+        else:
+            await msg.edit(f"❌ **Error en Leech:** `{str(e)}`")
+        cleanup(uid)
 
 # --- ⚙️ FFMPEG MONITOR ---
 async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
@@ -267,7 +289,6 @@ async def handle_input(client, message):
 @app.on_callback_query()
 async def cb_handler(client, query):
     uid, data = query.from_user.id, query.data
-    # ⚡ OPTIMIZACIÓN: Respuesta inmediata al servidor de Telegram
     await query.answer()
     
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
@@ -309,7 +330,6 @@ async def cb_handler(client, query):
         if uid in active_processes: active_processes[uid].terminate()
         return
 
-    # 🚀 Actualización de UI solo si hubo cambios o navegación de menús
     if changed or "menu_" in data:
         text = f"🛠️ **Ajustes de Video**\n\n{get_config_summary(uid)}" if "settings" in data or "set_" in data else f"🎬 **Menú Principal**\n\n{get_config_summary(uid)}"
         markup = get_settings_menu(uid) if "settings" in data or "set_" in data else get_main_menu(uid)
