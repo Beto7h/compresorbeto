@@ -1,7 +1,3 @@
----
-
-### 📄 Copia y pega esto en tu archivo `README.md`
-
 ```markdown
 # 🚀 CompresorBeto Elite Bot
 
