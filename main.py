@@ -1,4 +1,4 @@
-import os, time, asyncio, psutil, shutil, subprocess, re, sys
+import os, time, asyncio, psutil, shutil, subprocess, re, sys, yt_dlp
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from config import Config
@@ -77,6 +77,55 @@ def generate_thumbnail(video_path, uid):
     except: pass
     return None
 
+# --- 📥 LÓGICA DE LEECH (DESCARGA REMOTA) ---
+async def download_link(url, custom_name, msg, uid):
+    # Usamos la misma estructura de nombres que el resto del bot
+    output_template = f"in_{uid}_{int(time.time())}_%(title)s.%(ext)s"
+    ydl_opts = {
+        'outtmpl': output_template,
+        'noplaylist': True,
+        'quiet': True,
+        'no_warnings': True,
+    }
+
+    try:
+        await msg.edit(f"🔗 **Procesando enlace...**\n`{url}`")
+        
+        # Ejecutar descarga en un hilo separado para no bloquear el bot
+        loop = asyncio.get_event_loop()
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
+            filename = ydl.prepare_filename(info)
+
+        # Si el usuario definió un nombre con -n
+        if custom_name:
+            extension = os.path.splitext(filename)[1]
+            if not extension: extension = ".mp4"
+            new_path = f"in_{uid}_{int(time.time())}_{custom_name}{extension}"
+            os.rename(filename, new_path)
+            filename = new_path
+
+        # Clase simulada para que process_logic crea que es un mensaje de Telegram
+        class FakeMessage:
+            def __init__(self, path, name):
+                self.video = type('obj', (object,), {'file_name': name})
+                self.document = None
+                self.chat = msg.chat
+                self.from_user = msg.from_user
+            async def download(self, **kwargs):
+                return path
+
+        # Inicializar ajustes si es usuario nuevo
+        if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
+        
+        user_settings[uid]['orig_msg'] = FakeMessage(filename, os.path.basename(filename))
+        
+        await msg.edit(f"✅ **Descarga Completa**\n\n📄 `{os.path.basename(filename)}`", 
+                       reply_markup=get_main_menu(uid))
+
+    except Exception as e:
+        await msg.edit(f"❌ **Error en Leech:** `{str(e)}`")
+
 # --- 🎮 MENÚS ---
 def get_config_summary(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
@@ -128,7 +177,6 @@ async def progress_bar(current, total, status_msg, start_time, action):
     if uid in cancel_flags: raise Exception("USER_ABORTED")
     
     now = time.time()
-    # Solo actualiza si han pasado 15 segundos o si es el final (100%)
     last_update = last_update_time.get(uid, 0)
     
     if (now - last_update) > 15 or current == total:
@@ -165,7 +213,6 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
                 current_time_sec = ms / 1000000
                 now = time.time()
                 
-                # Monitor de FFmpeg también a 15 segundos para no saturar
                 if duration > 0 and (now - last_update) > 15:
                     percentage = min((current_time_sec / duration) * 100, 100)
                     elapsed = now - start_time
@@ -200,24 +247,23 @@ async def process_logic(uid, msg, settings, mode):
     if not extension: extension = ".mp4"
     
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    # Usamos marcas de tiempo para evitar conflictos de nombres
     input_path = os.path.join(base_dir, f"in_{uid}_{int(time.time())}{os.path.splitext(raw_name)[1]}")
     output_path = os.path.join(base_dir, f"out_{uid}_{int(time.time())}{extension}")
 
     try:
-        # Reset del tiempo de progreso para este proceso
         last_update_time[uid] = 0
         
-        await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "DESCARGANDO"))
+        # El bot intentará descargar el archivo (si es de Telegram) o usará el ya existente (si es Leech)
+        final_input = await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "DESCARGANDO"))
         
-        if not os.path.exists(input_path):
-            raise Exception("No se pudo descargar el archivo.")
+        if not os.path.exists(final_input):
+            raise Exception("No se pudo localizar el archivo de entrada.")
 
-        duration = get_duration(input_path)
+        duration = get_duration(final_input)
 
         if mode == "audio_only":
             cmd = [
-                "ffmpeg", "-y", "-i", input_path, 
+                "ffmpeg", "-y", "-i", final_input, 
                 "-c:v", "copy", 
                 "-c:a", str(settings['audio_codec']), "-b:a", "192k", 
                 "-movflags", "+faststart", 
@@ -227,7 +273,7 @@ async def process_logic(uid, msg, settings, mode):
         else:
             scale = f"scale=-2:{settings['res']}"
             cmd = [
-                "ffmpeg", "-y", "-i", input_path,
+                "ffmpeg", "-y", "-i", final_input,
                 "-vf", f"{scale},format=yuv420p",
                 "-c:v", "libx264", "-crf", str(settings['crf']),
                 "-preset", str(settings['preset']),
@@ -243,8 +289,6 @@ async def process_logic(uid, msg, settings, mode):
             raise Exception("FFmpeg no generó el archivo de salida.")
 
         thumb = generate_thumbnail(output_path, uid)
-        
-        # Reset del tiempo para la subida
         last_update_time[uid] = 0
         
         await app.send_video(
@@ -280,7 +324,22 @@ async def worker():
 async def start_cmd(client, message):
     uid = message.from_user.id
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
-    await message.reply(f"✨ **¡Bienvenido!** Envíame un video.\n\n{get_sys_stats_raw()}")
+    await message.reply(f"✨ **¡Bienvenido!** Envíame un video o usa `/leech [enlace]`.\n\n{get_sys_stats_raw()}")
+
+@app.on_message(filters.command("leech") & filters.private)
+async def leech_handler(client, message):
+    uid = message.from_user.id
+    text = message.text.replace("/leech", "").strip()
+    
+    if not text:
+        return await message.reply("⚠️ **Uso:** `/leech [url] -n [nombre]`")
+
+    # Separar link del nombre opcional
+    url = text.split(" -n ")[0].strip()
+    custom_name = text.split(" -n ")[1].strip() if " -n " in text else None
+    
+    status_msg = await message.reply("⏳ **Iniciando descarga remota...**")
+    await download_link(url, custom_name, status_msg, uid)
 
 @app.on_message((filters.video | filters.document) & filters.private)
 async def handle_input(client, message):
