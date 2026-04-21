@@ -18,8 +18,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 4. Copiamos todo el código de tu repositorio al contenedor
 COPY . .
 
-# 5. Damos permisos de ejecución al script de arranque
-RUN chmod +x run_bot.sh
+# 5. Damos permisos de ejecución al script de arranque (AUTOMÁTICO)
+RUN chmod +x /app/run_bot.sh
 
-# 6. Comando final: Ejecutar el script que lanza Aria2 y el Bot
-CMD ["./run_bot.sh"]
+# 6. Comando final: Usamos bash para asegurar la ejecución
+CMD ["/bin/bash", "/app/run_bot.sh"]
