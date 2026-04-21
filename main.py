@@ -4,6 +4,10 @@ from pyrogram.errors import FloodWait
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from config import Config
 
+# --- 📂 CONFIGURACIÓN DE RUTAS HÍBRIDAS ---
+# Esto detecta la carpeta donde está el script, sin importar el SO o si es Docker/Screen
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # --- 🛰️ INICIALIZACIÓN DEL CLIENTE ---
 app = Client(
     "CompresorElite", 
@@ -36,15 +40,15 @@ DEFAULT_SETTINGS = {
 
 # --- 🛠️ UTILIDADES DE SISTEMA ---
 def system_startup_cleanup():
-    for f in os.listdir("."):
+    for f in os.listdir(BASE_DIR):
         if any(f.startswith(prefix) for prefix in ["in_", "out_", "thumb_"]):
-            try: os.remove(f)
+            try: os.remove(os.path.join(BASE_DIR, f))
             except: pass
 
 def get_sys_stats_raw():
     cpu = psutil.cpu_percent()
     ram = psutil.virtual_memory().percent
-    _, _, free = shutil.disk_usage(".")
+    _, _, free = shutil.disk_usage(BASE_DIR)
     return f"⚙️ **CPU:** `{cpu}%` | 🧠 **RAM:** `{ram}%` | 💽 **Disco:** `{free // (1024**3)}GB`"
 
 def get_eta(current, total, speed):
@@ -53,9 +57,9 @@ def get_eta(current, total, speed):
     return time.strftime('%H:%M:%S', time.gmtime(remaining_time))
 
 def cleanup(uid):
-    for f in os.listdir("."):
+    for f in os.listdir(BASE_DIR):
         if any(x in f for x in [f"in_{uid}", f"out_{uid}", f"thumb_{uid}"]):
-            try: os.remove(f)
+            try: os.remove(os.path.join(BASE_DIR, f))
             except: pass
 
 def get_duration(file):
@@ -65,7 +69,7 @@ def get_duration(file):
     except: return 0
 
 def generate_thumbnail(video_path, uid):
-    thumb_path = os.path.abspath(f"thumb_{uid}.jpg")
+    thumb_path = os.path.join(BASE_DIR, f"thumb_{uid}.jpg")
     try:
         subprocess.run(["ffmpeg", "-y", "-ss", "00:00:05", "-i", video_path, "-vframes", "1", "-q:v", "2", thumb_path], 
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -105,10 +109,8 @@ async def aria2_monitor(gid, msg, uid):
     while True:
         try:
             download = aria2.get_download(gid)
-            if download.is_complete:
-                return True
-            if download.is_removed:
-                return False
+            if download.is_complete: return True
+            if download.is_removed: return False
             
             now = time.time()
             if (now - last_update_time.get(uid, 0)) > 12:
@@ -132,34 +134,36 @@ async def aria2_monitor(gid, msg, uid):
         except: break
     return False
 
-# --- 📥 LÓGICA DE LEECH (INTEGRADA Y CORREGIDA) ---
+# --- 📥 LÓGICA DE LEECH (HÍBRIDA) ---
 async def download_link(url, custom_name, msg, uid):
     cancel_flags.discard(uid)
     try:
         download = aria2.add_uris([url])
         gid = download.gid
-        
         success = await aria2_monitor(gid, msg, uid)
         
         if success:
-            await asyncio.sleep(3) # Tiempo de seguridad para liberación de archivo
+            await asyncio.sleep(3) # Delay de sincronización de disco
             download = aria2.get_download(gid)
-            filename = download.files[0].path
             
-            # Rastreo inteligente si el archivo no está en la ruta esperada (común en Yandex)
+            # Buscamos el archivo ignorando la ruta que nos de Aria (Docker Fix)
+            file_basename = os.path.basename(download.files[0].path)
+            filename = os.path.join(BASE_DIR, file_basename)
+            
+            # Rastreo físico si se guardó en subcarpeta o con nombre distinto
             if not os.path.exists(filename):
-                dir_name = os.path.dirname(filename) or "."
-                files = [os.path.join(dir_name, f) for f in os.listdir(dir_name) if os.path.isfile(os.path.join(dir_name, f))]
-                if files:
-                    filename = max(files, key=os.path.getctime) # Toma el más reciente
-
+                for root, dirs, files in os.walk(BASE_DIR):
+                    if file_basename in files:
+                        filename = os.path.join(root, file_basename)
+                        break
+            
             if not os.path.exists(filename):
-                raise Exception("El archivo fue descargado pero no se encuentra físicamente en el disco.")
+                raise Exception("El archivo descargado no se encuentra en la ruta esperada.")
 
-            # Renombrado seguro
+            # Renombrado seguro con Sanitización
             ext = os.path.splitext(filename)[1] or ".mp4"
             safe_name = re.sub(r'[\\/*?:"<>|]', "", custom_name) if custom_name else f"video_{int(time.time())}"
-            new_path = os.path.abspath(f"in_{uid}_{safe_name}{ext}")
+            new_path = os.path.join(BASE_DIR, f"in_{uid}_{safe_name}{ext}")
             
             os.rename(filename, new_path)
             filename = new_path
@@ -180,7 +184,7 @@ async def download_link(url, custom_name, msg, uid):
             cleanup(uid)
             
     except Exception as e:
-        await msg.edit(f"❌ **Error:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado.**")
+        await msg.edit(f"❌ **Error de Disco:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado.**")
         cleanup(uid)
 
 # --- ⚙️ FFMPEG MONITOR ---
@@ -208,7 +212,6 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
                            f"⚡ **PRESET:** `{settings['v_label']}` | 🚀 **V-ETA:** `{speed_factor:.2f}x`\n"
                            f"⏳ **RESTANTE:** `{eta}`\n\n🧪 **SISTEMA**\n{get_sys_stats_raw()}")
                     try: await msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]]))
-                    except FloodWait as e: await asyncio.sleep(e.value)
                     except: pass
                     last_update = now
             except: pass
@@ -222,29 +225,26 @@ async def process_logic(uid, msg, settings, mode):
     ext_orig = os.path.splitext(raw_name)[1] or ".mp4"
     extension = ext_orig if settings.get('keep_format', True) else ".mp4"
     
-    input_path = orig_msg.file_path if hasattr(orig_msg, 'file_path') else f"in_{uid}_{int(time.time())}{ext_orig}"
-    output_path = f"out_{uid}_{int(time.time())}{extension}"
+    # Rutas absolutas para evitar el error de /usr/src/app
+    input_path = orig_msg.file_path if hasattr(orig_msg, 'file_path') else os.path.join(BASE_DIR, f"in_{uid}_{int(time.time())}{ext_orig}")
+    output_path = os.path.join(BASE_DIR, f"out_{uid}_{int(time.time())}{extension}")
 
     try:
-        if not hasattr(orig_msg, 'file_path'): # Si viene de Telegram directo
+        if not hasattr(orig_msg, 'file_path'): # Descarga desde Telegram
             last_update_time[uid] = 0
             input_path = await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "PREPARANDO"))
         
         if not os.path.exists(input_path):
-            raise Exception("No se encontró el archivo de entrada para procesar.")
+            raise Exception("No se encontró el archivo de entrada.")
 
         duration = get_duration(input_path)
         if mode == "audio_only":
             cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "copy", "-c:a", str(settings['audio_codec']), "-b:a", "192k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
-            await ffmpeg_monitor(uid, msg, cmd, duration, settings, "CONVIRTIENDO AUDIO")
+            await ffmpeg_monitor(uid, msg, cmd, duration, settings, "EXTRAER AUDIO")
         else:
             cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", f"scale=-2:{settings['res']},format=yuv420p", "-c:v", "libx264", "-crf", str(settings['crf']), "-preset", str(settings['preset']), "-threads", "0", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "COMPRIMIENDO VIDEO")
 
-        if not os.path.exists(output_path):
-            raise Exception("FFmpeg terminó pero el archivo de salida no fue creado.")
-
-        last_update_time[uid] = 0
         await app.send_video(chat_id=uid, video=output_path, duration=int(get_duration(output_path)), thumb=generate_thumbnail(output_path, uid), file_name=raw_name, supports_streaming=True, progress=progress_bar, progress_args=(msg, time.time(), "SUBIENDO"), caption=f"✅ **Completado**\n\n📄 `{raw_name}`")
         
         try: await msg.delete()
@@ -364,6 +364,7 @@ async def worker():
 async def main_startup():
     system_startup_cleanup()
     await app.start(); asyncio.create_task(worker())
-    print("🔥 Bot Optimizado en línea"); await asyncio.Event().wait()
+    print("🔥 Bot Híbrido (Screen/Docker) en línea")
+    await asyncio.Event().wait()
 
 if __name__ == "__main__": app.run(main_startup())
