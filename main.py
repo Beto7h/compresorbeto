@@ -69,7 +69,6 @@ async def progress_bar(current, total, status_msg, start_time, action):
     now = time.time()
     last_update = last_update_time.get(uid, 0)
     
-    # Mantenemos estrictamente los 12 segundos solicitados
     if (now - last_update) > 12 or current == total:
         last_update_time[uid] = now
         percentage = current * 100 / total
@@ -82,19 +81,19 @@ async def progress_bar(current, total, status_msg, start_time, action):
                f"🚀 **VEL:** `{speed/(1024**2):.2f}` MB/s | ⏳ **ETA:** `{eta}`\n\n"
                f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
         try: 
-            # Botón de cancelación integrado en la barra
             await status_msg.edit(
                 tmp, 
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 CANCELAR", callback_data=f"abort_{uid}")]])
             )
         except: pass
 
-# --- 📥 LÓGICA DE LEECH (Integración Aria2 + Cancelar) ---
+# --- 📥 LÓGICA DE LEECH (Ajustada para Barra en Bot) ---
 async def download_link(url, custom_name, msg, uid):
     last_update_time[uid] = 0
     start_time = time.time()
-    loop = asyncio.get_running_loop()
-    cancel_flags.discard(uid) # Reset de flag antes de iniciar
+    # Capturamos el loop actual para que los hilos de yt-dlp puedan comunicarse
+    loop = asyncio.get_event_loop()
+    cancel_flags.discard(uid)
 
     def ytdl_hook(d):
         if uid in cancel_flags:
@@ -104,6 +103,7 @@ async def download_link(url, custom_name, msg, uid):
             current = d.get('downloaded_bytes', 0)
             total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
             if total > 0:
+                # Usamos threadsafe para evitar el error de loop en hilos asíncronos
                 asyncio.run_coroutine_threadsafe(
                     progress_bar(current, total, msg, start_time, "LEECH (MODO ARIA2)"), 
                     loop
@@ -115,13 +115,13 @@ async def download_link(url, custom_name, msg, uid):
         'quiet': True, 
         'no_warnings': True,
         'progress_hooks': [ytdl_hook],
-        # --- POTENCIA ARIA2 ---
         'external_downloader': 'aria2c',
         'external_downloader_args': [
+            '--quiet=true',         # Silencia la terminal para que los datos fluyan a Python
+            '--summary-interval=0', # Reporte inmediato de progreso
             '-x', '16', 
             '-s', '16', 
             '-k', '1M',
-            '--summary-interval=0', # Clave para que yt-dlp recupere el progreso
         ],
         'noprogress': False, 
         'retries': 10,
@@ -129,7 +129,7 @@ async def download_link(url, custom_name, msg, uid):
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Ejecución en executor para no bloquear el bot
+            # Ejecutamos en un executor para no congelar el bot mientras descarga
             info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
             filename = ydl.prepare_filename(info)
 
