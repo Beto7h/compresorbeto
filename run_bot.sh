@@ -1,7 +1,9 @@
 #!/bin/bash
 
+# Actualizar yt-dlp cada vez que inicie el bot
+pip install -U yt-dlp
+
 echo "🌐 Iniciando servidor Aria2 RPC..."
-# Añadimos --dir=/app para sincronizar rutas con el bot
 aria2c --enable-rpc --rpc-listen-all --dir=/app --daemon=true
 
 sleep 2
