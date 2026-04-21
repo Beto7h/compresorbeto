@@ -1,5 +1,6 @@
 import os, time, asyncio, psutil, shutil, subprocess, re, sys, yt_dlp
 from pyrogram import Client, filters
+from pyrogram.errors import FloodWait
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from config import Config
 
@@ -31,6 +32,13 @@ DEFAULT_SETTINGS = {
 }
 
 # --- 🛠️ UTILIDADES DE SISTEMA ---
+def system_startup_cleanup():
+    """Limpia archivos temporales al iniciar para evitar disco lleno"""
+    for f in os.listdir("."):
+        if any(f.startswith(prefix) for prefix in ["in_", "out_", "thumb_"]):
+            try: os.remove(f)
+            except: pass
+
 def get_sys_stats_raw():
     cpu = psutil.cpu_percent()
     ram = psutil.virtual_memory().percent
@@ -62,7 +70,7 @@ def generate_thumbnail(video_path, uid):
         return thumb_path if os.path.exists(thumb_path) else None
     except: return None
 
-# --- 📊 BARRAS DE PROGRESO (Actualización fija a 12s) ---
+# --- 📊 BARRAS DE PROGRESO (Con manejo de FloodWait) ---
 async def progress_bar(current, total, status_msg, start_time, action):
     uid = status_msg.chat.id
     if uid in cancel_flags: raise Exception("USER_ABORTED")
@@ -85,25 +93,24 @@ async def progress_bar(current, total, status_msg, start_time, action):
                 tmp, 
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 CANCELAR", callback_data=f"abort_{uid}")]])
             )
+        except FloodWait as e:
+            await asyncio.sleep(e.value) # Si Telegram nos frena, esperamos
         except: pass
 
-# --- 📥 LÓGICA DE LEECH (Ajustada para Barra en Bot) ---
+# --- 📥 LÓGICA DE LEECH (Integración Aria2 + Progress) ---
 async def download_link(url, custom_name, msg, uid):
     last_update_time[uid] = 0
     start_time = time.time()
-    # Capturamos el loop actual para que los hilos de yt-dlp puedan comunicarse
     loop = asyncio.get_event_loop()
     cancel_flags.discard(uid)
 
     def ytdl_hook(d):
-        if uid in cancel_flags:
-            raise Exception("USER_ABORTED")
-            
+        if uid in cancel_flags: raise Exception("USER_ABORTED")
         if d['status'] == 'downloading':
             current = d.get('downloaded_bytes', 0)
             total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
             if total > 0:
-                # Usamos threadsafe para evitar el error de loop en hilos asíncronos
+                # Threadsafe es vital aquí para que el hilo de yt-dlp hable con el bot
                 asyncio.run_coroutine_threadsafe(
                     progress_bar(current, total, msg, start_time, "LEECH (MODO ARIA2)"), 
                     loop
@@ -117,10 +124,10 @@ async def download_link(url, custom_name, msg, uid):
         'progress_hooks': [ytdl_hook],
         'external_downloader': 'aria2c',
         'external_downloader_args': [
-            '--quiet=true',         # Silencia la terminal para que los datos fluyan a Python
-            '--summary-interval=0', # Reporte inmediato de progreso
-            '-x', '16', 
-            '-s', '16', 
+            '--quiet=true',          # SILENCIA la terminal para que los datos fluyan a Python
+            '--summary-interval=0',  # Reporte continuo para la barra
+            '-x', '16',              # 16 conexiones
+            '-s', '16',              # 16 partes
             '-k', '1M',
         ],
         'noprogress': False, 
@@ -129,16 +136,16 @@ async def download_link(url, custom_name, msg, uid):
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Ejecutamos en un executor para no congelar el bot mientras descarga
+            # Ejecución en hilo separado para no bloquear el bot
             info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
             filename = ydl.prepare_filename(info)
 
         if custom_name:
             ext = os.path.splitext(filename)[1] or ".mp4"
             new_path = f"in_{uid}_{int(time.time())}_{custom_name}{ext}"
-            os.rename(filename, new_path)
-            filename = new_path
+            os.rename(filename, new_path); filename = new_path
 
+        # Creamos un objeto falso para reutilizar la lógica de procesamiento
         class FakeMessage:
             def __init__(self, p, n):
                 self.video = type('obj', (object,), {'file_name': n})
@@ -151,10 +158,7 @@ async def download_link(url, custom_name, msg, uid):
         
         await msg.edit(f"✅ **Leech Aria2 Completado**\n\n📄 `{os.path.basename(filename)}`", reply_markup=get_main_menu(uid))
     except Exception as e:
-        if "USER_ABORTED" in str(e):
-            await msg.edit("🛑 **Descarga cancelada.**")
-        else:
-            await msg.edit(f"❌ **Error en Leech:** `{str(e)}`")
+        await msg.edit(f"❌ **Error:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado.**")
         cleanup(uid)
 
 # --- ⚙️ FFMPEG MONITOR ---
@@ -182,6 +186,7 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
                            f"⚡ **PRESET:** `{settings['v_label']}` | 🚀 **V-ETA:** `{speed_factor:.2f}x`\n"
                            f"⏳ **RESTANTE:** `{eta}`\n\n🧪 **SISTEMA**\n{get_sys_stats_raw()}")
                     try: await msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]]))
+                    except FloodWait as e: await asyncio.sleep(e.value)
                     except: pass
                     last_update = now
             except: pass
@@ -195,8 +200,8 @@ async def process_logic(uid, msg, settings, mode):
     ext_orig = os.path.splitext(raw_name)[1] or ".mp4"
     extension = ext_orig if settings.get('keep_format', True) else ".mp4"
     
-    input_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"in_{uid}_{int(time.time())}{ext_orig}")
-    output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"out_{uid}_{int(time.time())}{extension}")
+    input_path = os.path.join(os.getcwd(), f"in_{uid}_{int(time.time())}{ext_orig}")
+    output_path = os.path.join(os.getcwd(), f"out_{uid}_{int(time.time())}{extension}")
 
     try:
         last_update_time[uid] = 0
@@ -215,20 +220,16 @@ async def process_logic(uid, msg, settings, mode):
         try: await msg.delete()
         except: pass
     except Exception as e:
-        if "USER_ABORTED" in str(e): await msg.edit("❌ **Cancelado.**")
-        else: await msg.edit(f"❌ **Error:** `{e}`")
+        await msg.edit(f"❌ **Error:** `{e}`" if "USER_ABORTED" not in str(e) else "❌ **Cancelado.**")
     finally:
         active_processes.pop(uid, None); cleanup(uid)
 
-# --- FUNCIONES DE MENÚS ---
+# --- MENÚS ---
 def get_config_summary(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
-    f_label = "Original" if s.get('keep_format', True) else "MP4"
-    return (f"📝 **CONFIGURACIÓN ACTUAL:**\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
+    return (f"📝 **CONFIGURACIÓN ACTUAL:**\n━━━━━━━━━━━━━━━━━━━━\n"
             f"💎 **Calidad:** `{s['q_label']}` | 📏 **Res:** `{s['res']}p`\n"
-            f"⚡ **Preset:** `{s['v_label']}` | 🎵 **Audio:** `{s['a_label']}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━")
+            f"⚡ **Preset:** `{s['v_label']}` | 🎵 **Audio:** `{s['a_label']}`\n━━━━━━━━━━━━━━━━━━━━")
 
 def get_main_menu(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
@@ -255,14 +256,14 @@ def get_settings_menu(uid):
         [InlineKeyboardButton(f"{'✅ ' if s.get('res')=='480' else ''}480p", callback_data="set_r_480"),
          InlineKeyboardButton(f"{'✅ ' if s.get('res')=='720' else ''}720p", callback_data="set_r_720"),
          InlineKeyboardButton(f"{'✅ ' if s.get('res')=='1080' else ''}1080p", callback_data="set_r_1080")],
-        [InlineKeyboardButton("── VELOCIDAD (PRESET) ──", callback_data="n")],
+        [InlineKeyboardButton("── VELOCIDAD ──", callback_data="n")],
         [InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Lento' else ''}Lento", callback_data="set_v_slower_Lento"),
          InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Medio' else ''}Medio", callback_data="set_v_medium_Medio"),
          InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Ultra' else ''}Ultra", callback_data="set_v_ultrafast_Ultra")],
         [InlineKeyboardButton("⬅️ VOLVER AL INICIO", callback_data="menu_main")]
     ])
 
-# --- 🛰️ MANEJADORES ---
+# --- MANEJADORES ---
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message):
     uid = message.from_user.id
@@ -290,41 +291,29 @@ async def handle_input(client, message):
 async def cb_handler(client, query):
     uid, data = query.from_user.id, query.data
     await query.answer()
-    
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
-
+    
     changed = False
     if data.startswith("set_q_"):
         val = data.split("_")[2]
         user_settings[uid]['crf'] = val
         user_settings[uid]['q_label'] = {"30":"Baja", "24":"Estándar", "18":"Súper"}[val]
         changed = True
-    elif data.startswith("set_r_"): 
-        user_settings[uid]['res'] = data.split("_")[2]
-        changed = True
+    elif data.startswith("set_r_"): user_settings[uid]['res'] = data.split("_")[2]; changed = True
     elif data.startswith("set_v_"):
-        parts = data.split("_")
-        user_settings[uid]['preset'], user_settings[uid]['v_label'] = parts[2], parts[3]
+        parts = data.split("_"); user_settings[uid]['preset'], user_settings[uid]['v_label'] = parts[2], parts[3]
         changed = True
     elif data.startswith("set_aud_"):
-        parts = data.split("_")
-        user_settings[uid]['audio_codec'], user_settings[uid]['a_label'] = parts[2], parts[3]
+        parts = data.split("_"); user_settings[uid]['audio_codec'], user_settings[uid]['a_label'] = parts[2], parts[3]
         changed = True
-    elif data == "mode_keep": 
-        user_settings[uid]['keep_format'] = True
-        changed = True
-    elif data == "mode_mp4": 
-        user_settings[uid]['keep_format'] = False
-        changed = True
-    
+    elif data == "mode_keep": user_settings[uid]['keep_format'] = True; changed = True
+    elif data == "mode_mp4": user_settings[uid]['keep_format'] = False; changed = True
     elif data == "run_comp":
         await processing_queue.put((uid, query.message, user_settings[uid].copy(), "comp"))
-        await query.message.edit("⏳ **Añadido a la cola de compresión...**")
-        return
+        await query.message.edit("⏳ **Añadido a la cola de compresión...**"); return
     elif data == "run_audio_only":
         await processing_queue.put((uid, query.message, user_settings[uid].copy(), "audio_only"))
-        await query.message.edit("⏳ **Añadido a la cola de extracción...**")
-        return
+        await query.message.edit("⏳ **Añadido a la cola de extracción...**"); return
     elif data.startswith("abort_"):
         cancel_flags.add(uid)
         if uid in active_processes: active_processes[uid].terminate()
@@ -343,6 +332,7 @@ async def worker():
         processing_queue.task_done()
 
 async def main_startup():
+    system_startup_cleanup()
     await app.start(); asyncio.create_task(worker())
     print("🔥 Bot Optimizado en línea"); await asyncio.Event().wait()
 
