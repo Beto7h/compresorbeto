@@ -1,5 +1,4 @@
 ---
-
 # 🚀 Compresor Élite - Guía de Despliegue en VPS
 
 Este documento contiene los pasos exactos para instalar y ejecutar el bot en una VPS limpia desde cero, utilizando **Docker** para evitar errores de rutas o dependencias.
