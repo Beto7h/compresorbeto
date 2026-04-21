@@ -70,14 +70,13 @@ def generate_thumbnail(video_path, uid):
         return thumb_path if os.path.exists(thumb_path) else None
     except: return None
 
-# --- 📊 BARRAS DE PROGRESO (Con tu intervalo de 12 segundos) ---
+# --- 📊 BARRAS DE PROGRESO (Intervalo de 12 segundos mantenido) ---
 async def progress_bar(current, total, status_msg, start_time, action):
     uid = status_msg.chat.id
     if uid in cancel_flags: raise Exception("USER_ABORTED")
     now = time.time()
     last_update = last_update_time.get(uid, 0)
     
-    # Mantenemos tus 12 segundos originales para estabilidad máxima
     if (now - last_update) > 12 or current == total:
         last_update_time[uid] = now
         percentage = current * 100 / total
@@ -98,7 +97,7 @@ async def progress_bar(current, total, status_msg, start_time, action):
             await asyncio.sleep(e.value)
         except: pass
 
-# --- 📥 LÓGICA DE LEECH (Ajuste para Aria2) ---
+# --- 📥 LÓGICA DE LEECH (Ajuste definitivo para Aria2) ---
 async def download_link(url, custom_name, msg, uid):
     last_update_time[uid] = 0
     start_time = time.time()
@@ -108,7 +107,7 @@ async def download_link(url, custom_name, msg, uid):
     def ytdl_hook(d):
         if uid in cancel_flags: raise Exception("USER_ABORTED")
         if d['status'] == 'downloading':
-            # Captura bytes desde Aria2 incluso si vienen fragmentados
+            # Buscamos bytes descargados o fragmentos para despertar la barra
             current = d.get('downloaded_bytes') or d.get('fragment_index', 0)
             total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
             
@@ -121,19 +120,17 @@ async def download_link(url, custom_name, msg, uid):
     ydl_opts = {
         'outtmpl': f"in_{uid}_{int(time.time())}_%(title)s.%(ext)s",
         'noplaylist': True, 
-        'quiet': True, 
-        'no_warnings': True,
+        'quiet': False, # IMPORTANTE: False para que capture el flujo de aria2
+        'no_warnings': False,
         'progress_hooks': [ytdl_hook],
         'external_downloader': 'aria2c',
         'check_formats': True,
         'allow_unhandled_protocols': True,
         'format': 'best',
         'external_downloader_args': [
-            '--quiet=true',
-            '--summary-interval=1',
+            '--summary-interval=1', # Forzamos reporte cada segundo
             '--show-console-readout=false',
             '--no-conf=true',
-            '--console-log-level=error',
             '-x', '16', 
             '-s', '16', 
             '-k', '1M',
@@ -145,6 +142,7 @@ async def download_link(url, custom_name, msg, uid):
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Extraemos info y descargamos en un hilo separado para no bloquear
             info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
             filename = ydl.prepare_filename(info)
 
