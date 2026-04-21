@@ -1,4 +1,4 @@
-import os, time, asyncio, psutil, shutil, subprocess, re, sys, yt_dlp
+import os, time, asyncio, psutil, shutil, subprocess, re, sys, yt_dlp, aria2p
 from pyrogram import Client, filters
 from pyrogram.errors import FloodWait
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
@@ -12,6 +12,10 @@ app = Client(
     bot_token=Config.BOT_TOKEN, 
     session_string=Config.SESSION_STRING
 )
+
+# --- 🚀 INICIALIZACIÓN DE ARIA2P (RPC) ---
+# Se asume que aria2c está corriendo: aria2c --enable-rpc --rpc-listen-all --daemon=true
+aria2 = aria2p.API(aria2p.Client(host="http://localhost", port=6800, secret=""))
 
 # --- 🌍 VARIABLES GLOBALES ---
 processing_queue = asyncio.Queue()
@@ -33,7 +37,6 @@ DEFAULT_SETTINGS = {
 
 # --- 🛠️ UTILIDADES DE SISTEMA ---
 def system_startup_cleanup():
-    """Limpia archivos temporales al iniciar para evitar disco lleno"""
     for f in os.listdir("."):
         if any(f.startswith(prefix) for prefix in ["in_", "out_", "thumb_"]):
             try: os.remove(f)
@@ -70,7 +73,7 @@ def generate_thumbnail(video_path, uid):
         return thumb_path if os.path.exists(thumb_path) else None
     except: return None
 
-# --- 📊 BARRAS DE PROGRESO (Intervalo de 12 segundos mantenido) ---
+# --- 📊 BARRAS DE PROGRESO (Para Subida/Descarga TG/FFMPEG) ---
 async def progress_bar(current, total, status_msg, start_time, action):
     uid = status_msg.chat.id
     if uid in cancel_flags: raise Exception("USER_ABORTED")
@@ -97,58 +100,59 @@ async def progress_bar(current, total, status_msg, start_time, action):
             await asyncio.sleep(e.value)
         except: pass
 
-# --- 📥 LÓGICA DE LEECH (Ajuste definitivo para Aria2) ---
-async def download_link(url, custom_name, msg, uid):
+# --- 📊 MONITOR ARIA2 (Estilo Mirror Leech) ---
+async def aria2_monitor(gid, msg, uid, start_time):
     last_update_time[uid] = 0
-    start_time = time.time()
-    loop = asyncio.get_event_loop()
-    cancel_flags.discard(uid)
-
-    def ytdl_hook(d):
-        if uid in cancel_flags: raise Exception("USER_ABORTED")
-        if d['status'] == 'downloading':
-            # Buscamos bytes descargados o fragmentos para despertar la barra
-            current = d.get('downloaded_bytes') or d.get('fragment_index', 0)
-            total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+    while True:
+        try:
+            download = aria2.get_download(gid)
+            if download.is_complete:
+                break
+            if download.is_removed:
+                raise Exception("USER_ABORTED")
             
-            if total and total > 0:
-                asyncio.run_coroutine_threadsafe(
-                    progress_bar(current, total, msg, start_time, "LEECH (ARIA2)"), 
-                    loop
-                )
+            now = time.time()
+            if (now - last_update_time.get(uid, 0)) > 12:
+                last_update_time[uid] = now
+                percentage = download.progress
+                bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
+                
+                tmp = (f"📥 **LEECH (ARIA2)**\n« {bar} »  **{percentage:.1f}%**\n\n"
+                       f"📊 **DATOS:** `{download.completed_length_string()}` / `{download.total_length_string()}`\n"
+                       f"🚀 **VEL:** `{download.download_speed_string()}` | ⏳ **ETA:** `{download.eta_string()}`\n\n"
+                       f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
+                
+                try: await msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 CANCELAR", callback_data=f"abort_{uid}")]]))
+                except: pass
+            
+            if uid in cancel_flags:
+                aria2.remove([download], force=True, files=True)
+                break
+                
+            await asyncio.sleep(1)
+        except Exception: break
 
-    ydl_opts = {
-        'outtmpl': f"in_{uid}_{int(time.time())}_%(title)s.%(ext)s",
-        'noplaylist': True, 
-        'quiet': False, # IMPORTANTE: False para que capture el flujo de aria2
-        'no_warnings': False,
-        'progress_hooks': [ytdl_hook],
-        'external_downloader': 'aria2c',
-        'check_formats': True,
-        'allow_unhandled_protocols': True,
-        'format': 'best',
-        'external_downloader_args': [
-            '--summary-interval=1', # Forzamos reporte cada segundo
-            '--show-console-readout=false',
-            '--no-conf=true',
-            '-x', '16', 
-            '-s', '16', 
-            '-k', '1M',
-        ],
-        'noprogress': False, 
-        'retries': 10,
-        'logger': None,
-    }
-
+# --- 📥 LÓGICA DE LEECH (Ajuste Final Aria2 RPC) ---
+async def download_link(url, custom_name, msg, uid):
+    cancel_flags.discard(uid)
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Extraemos info y descargamos en un hilo separado para no bloquear
-            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
-            filename = ydl.prepare_filename(info)
+        # Añadir descarga a Aria2
+        download = aria2.add_uris([url])
+        gid = download.gid
+        
+        # Iniciar el monitor de progreso RPC
+        await aria2_monitor(gid, msg, uid, time.time())
+        
+        # Esperar a que termine y obtener la ruta
+        download = aria2.get_download(gid)
+        if not download.is_complete:
+            return # Si salió del bucle sin completar es que fue cancelado
+            
+        filename = download.files[0].path
 
         if custom_name:
             ext = os.path.splitext(filename)[1] or ".mp4"
-            new_path = f"in_{uid}_{int(time.time())}_{custom_name}{ext}"
+            new_path = os.path.join(os.path.dirname(filename), f"in_{uid}_{int(time.time())}_{custom_name}{ext}")
             os.rename(filename, new_path); filename = new_path
 
         class FakeMessage:
