@@ -1,0 +1,10 @@
+version: '3.8'
+
+services:
+  betobot:
+    build: .
+    container_name: compresor_beto_cont
+    network_mode: "host"
+    volumes:
+      - .:/app
+    restart: unless-stopped
