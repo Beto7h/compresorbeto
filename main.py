@@ -14,7 +14,6 @@ app = Client(
 )
 
 # --- 🚀 INICIALIZACIÓN DE ARIA2P (RPC) ---
-# Se asume que aria2c está corriendo: aria2c --enable-rpc --rpc-listen-all --daemon=true
 aria2 = aria2p.API(aria2p.Client(host="http://localhost", port=6800, secret=""))
 
 # --- 🌍 VARIABLES GLOBALES ---
@@ -73,7 +72,7 @@ def generate_thumbnail(video_path, uid):
         return thumb_path if os.path.exists(thumb_path) else None
     except: return None
 
-# --- 📊 BARRAS DE PROGRESO (Para Subida/Descarga TG/FFMPEG) ---
+# --- 📊 BARRAS DE PROGRESO ---
 async def progress_bar(current, total, status_msg, start_time, action):
     uid = status_msg.chat.id
     if uid in cancel_flags: raise Exception("USER_ABORTED")
@@ -100,16 +99,16 @@ async def progress_bar(current, total, status_msg, start_time, action):
             await asyncio.sleep(e.value)
         except: pass
 
-# --- 📊 MONITOR ARIA2 (Estilo Mirror Leech) ---
-async def aria2_monitor(gid, msg, uid, start_time):
+# --- 📊 MONITOR ARIA2 ---
+async def aria2_monitor(gid, msg, uid):
     last_update_time[uid] = 0
     while True:
         try:
             download = aria2.get_download(gid)
             if download.is_complete:
-                break
+                return True
             if download.is_removed:
-                raise Exception("USER_ABORTED")
+                return False
             
             now = time.time()
             if (now - last_update_time.get(uid, 0)) > 12:
@@ -127,45 +126,51 @@ async def aria2_monitor(gid, msg, uid, start_time):
             
             if uid in cancel_flags:
                 aria2.remove([download], force=True, files=True)
-                break
+                return False
                 
             await asyncio.sleep(1)
-        except Exception: break
+        except: break
+    return False
 
-# --- 📥 LÓGICA DE LEECH (Ajuste Final Aria2 RPC) ---
+# --- 📥 LÓGICA DE LEECH ---
 async def download_link(url, custom_name, msg, uid):
     cancel_flags.discard(uid)
     try:
-        # Añadir descarga a Aria2
         download = aria2.add_uris([url])
         gid = download.gid
         
-        # Iniciar el monitor de progreso RPC
-        await aria2_monitor(gid, msg, uid, time.time())
+        # ESPERAR ACTIVAMENTE LA FINALIZACIÓN
+        success = await aria2_monitor(gid, msg, uid)
         
-        # Esperar a que termine y obtener la ruta
-        download = aria2.get_download(gid)
-        if not download.is_complete:
-            return # Si salió del bucle sin completar es que fue cancelado
+        if success:
+            await asyncio.sleep(2) # Tiempo para liberar el archivo del proceso aria2
+            download = aria2.get_download(gid)
+            filename = download.files[0].path
             
-        filename = download.files[0].path
+            # Verificar que el archivo exista realmente en disco
+            if not os.path.exists(filename):
+                raise Exception("El archivo fue descargado pero no se encuentra en el disco.")
 
-        if custom_name:
-            ext = os.path.splitext(filename)[1] or ".mp4"
-            new_path = os.path.join(os.path.dirname(filename), f"in_{uid}_{int(time.time())}_{custom_name}{ext}")
-            os.rename(filename, new_path); filename = new_path
+            if custom_name:
+                ext = os.path.splitext(filename)[1] or ".mp4"
+                new_path = os.path.join(os.path.dirname(filename), f"in_{uid}_{int(time.time())}_{custom_name}{ext}")
+                os.rename(filename, new_path); filename = new_path
 
-        class FakeMessage:
-            def __init__(self, p, n):
-                self.video = type('obj', (object,), {'file_name': n})
-                self.document = None; self.chat = msg.chat; self.from_user = msg.from_user
-                self.file_path = p
-            async def download(self, **kwargs): return self.file_path
+            class FakeMessage:
+                def __init__(self, p, n, msg_obj):
+                    self.video = type('obj', (object,), {'file_name': n})
+                    self.document = None; self.chat = msg_obj.chat; self.from_user = msg_obj.from_user
+                    self.file_path = os.path.abspath(p)
+                async def download(self, **kwargs): return self.file_path
 
-        if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
-        user_settings[uid]['orig_msg'] = FakeMessage(filename, os.path.basename(filename))
-        
-        await msg.edit(f"✅ **Leech Aria2 Completado**\n\n📄 `{os.path.basename(filename)}`", reply_markup=get_main_menu(uid))
+            if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
+            user_settings[uid]['orig_msg'] = FakeMessage(filename, os.path.basename(filename), msg)
+            
+            await msg.edit(f"✅ **Leech Aria2 Completado**\n\n📄 `{os.path.basename(filename)}`", reply_markup=get_main_menu(uid))
+        else:
+            await msg.edit("🛑 **Descarga cancelada o fallida.**")
+            cleanup(uid)
+            
     except Exception as e:
         await msg.edit(f"❌ **Error:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado.**")
         cleanup(uid)
@@ -209,13 +214,17 @@ async def process_logic(uid, msg, settings, mode):
     ext_orig = os.path.splitext(raw_name)[1] or ".mp4"
     extension = ext_orig if settings.get('keep_format', True) else ".mp4"
     
-    input_path = os.path.join(os.getcwd(), f"in_{uid}_{int(time.time())}{ext_orig}")
-    output_path = os.path.join(os.getcwd(), f"out_{uid}_{int(time.time())}{extension}")
+    # Rutas relativas para máxima compatibilidad
+    input_path = f"in_{uid}_{int(time.time())}{ext_orig}"
+    output_path = f"out_{uid}_{int(time.time())}{extension}"
 
     try:
         last_update_time[uid] = 0
-        final_input = await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "DESCARGANDO"))
+        final_input = await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "PREPARANDO"))
         
+        if not os.path.exists(final_input):
+            raise Exception("No se encontró el archivo de entrada para procesar.")
+
         duration = get_duration(final_input)
         if mode == "audio_only":
             cmd = ["ffmpeg", "-y", "-i", final_input, "-c:v", "copy", "-c:a", str(settings['audio_codec']), "-b:a", "192k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
@@ -224,8 +233,12 @@ async def process_logic(uid, msg, settings, mode):
             cmd = ["ffmpeg", "-y", "-i", final_input, "-vf", f"scale=-2:{settings['res']},format=yuv420p", "-c:v", "libx264", "-crf", str(settings['crf']), "-preset", str(settings['preset']), "-threads", "0", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "COMPRIMIENDO VIDEO")
 
+        if not os.path.exists(output_path):
+            raise Exception("FFmpeg terminó pero el archivo de salida no fue creado.")
+
         last_update_time[uid] = 0
         await app.send_video(chat_id=uid, video=output_path, duration=int(get_duration(output_path)), thumb=generate_thumbnail(output_path, uid), file_name=raw_name, supports_streaming=True, progress=progress_bar, progress_args=(msg, time.time(), "SUBIENDO"), caption=f"✅ **Completado**\n\n📄 `{raw_name}`")
+        
         try: await msg.delete()
         except: pass
     except Exception as e:
