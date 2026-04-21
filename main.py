@@ -132,29 +132,37 @@ async def aria2_monitor(gid, msg, uid):
         except: break
     return False
 
-# --- 📥 LÓGICA DE LEECH ---
+# --- 📥 LÓGICA DE LEECH (INTEGRADA Y CORREGIDA) ---
 async def download_link(url, custom_name, msg, uid):
     cancel_flags.discard(uid)
     try:
         download = aria2.add_uris([url])
         gid = download.gid
         
-        # ESPERAR ACTIVAMENTE LA FINALIZACIÓN
         success = await aria2_monitor(gid, msg, uid)
         
         if success:
-            await asyncio.sleep(2) # Tiempo para liberar el archivo del proceso aria2
+            await asyncio.sleep(3) # Tiempo de seguridad para liberación de archivo
             download = aria2.get_download(gid)
             filename = download.files[0].path
             
-            # Verificar que el archivo exista realmente en disco
+            # Rastreo inteligente si el archivo no está en la ruta esperada (común en Yandex)
             if not os.path.exists(filename):
-                raise Exception("El archivo fue descargado pero no se encuentra en el disco.")
+                dir_name = os.path.dirname(filename) or "."
+                files = [os.path.join(dir_name, f) for f in os.listdir(dir_name) if os.path.isfile(os.path.join(dir_name, f))]
+                if files:
+                    filename = max(files, key=os.path.getctime) # Toma el más reciente
 
-            if custom_name:
-                ext = os.path.splitext(filename)[1] or ".mp4"
-                new_path = os.path.join(os.path.dirname(filename), f"in_{uid}_{int(time.time())}_{custom_name}{ext}")
-                os.rename(filename, new_path); filename = new_path
+            if not os.path.exists(filename):
+                raise Exception("El archivo fue descargado pero no se encuentra físicamente en el disco.")
+
+            # Renombrado seguro
+            ext = os.path.splitext(filename)[1] or ".mp4"
+            safe_name = re.sub(r'[\\/*?:"<>|]', "", custom_name) if custom_name else f"video_{int(time.time())}"
+            new_path = os.path.abspath(f"in_{uid}_{safe_name}{ext}")
+            
+            os.rename(filename, new_path)
+            filename = new_path
 
             class FakeMessage:
                 def __init__(self, p, n, msg_obj):
@@ -166,7 +174,7 @@ async def download_link(url, custom_name, msg, uid):
             if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
             user_settings[uid]['orig_msg'] = FakeMessage(filename, os.path.basename(filename), msg)
             
-            await msg.edit(f"✅ **Leech Aria2 Completado**\n\n📄 `{os.path.basename(filename)}`", reply_markup=get_main_menu(uid))
+            await msg.edit(f"✅ **Archivo listo para procesar**\n\n📄 `{os.path.basename(filename)}`", reply_markup=get_main_menu(uid))
         else:
             await msg.edit("🛑 **Descarga cancelada o fallida.**")
             cleanup(uid)
@@ -210,27 +218,27 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
 # --- ⚙️ LÓGICA DE PROCESAMIENTO ---
 async def process_logic(uid, msg, settings, mode):
     orig_msg = settings['orig_msg']
-    raw_name = orig_msg.video.file_name if orig_msg.video else (orig_msg.document.file_name if orig_msg.document else "video.mp4")
+    raw_name = orig_msg.video.file_name if (hasattr(orig_msg, 'video') and orig_msg.video) else (orig_msg.document.file_name if (hasattr(orig_msg, 'document') and orig_msg.document) else "video.mp4")
     ext_orig = os.path.splitext(raw_name)[1] or ".mp4"
     extension = ext_orig if settings.get('keep_format', True) else ".mp4"
     
-    # Rutas relativas para máxima compatibilidad
-    input_path = f"in_{uid}_{int(time.time())}{ext_orig}"
+    input_path = orig_msg.file_path if hasattr(orig_msg, 'file_path') else f"in_{uid}_{int(time.time())}{ext_orig}"
     output_path = f"out_{uid}_{int(time.time())}{extension}"
 
     try:
-        last_update_time[uid] = 0
-        final_input = await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "PREPARANDO"))
+        if not hasattr(orig_msg, 'file_path'): # Si viene de Telegram directo
+            last_update_time[uid] = 0
+            input_path = await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, time.time(), "PREPARANDO"))
         
-        if not os.path.exists(final_input):
+        if not os.path.exists(input_path):
             raise Exception("No se encontró el archivo de entrada para procesar.")
 
-        duration = get_duration(final_input)
+        duration = get_duration(input_path)
         if mode == "audio_only":
-            cmd = ["ffmpeg", "-y", "-i", final_input, "-c:v", "copy", "-c:a", str(settings['audio_codec']), "-b:a", "192k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
+            cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "copy", "-c:a", str(settings['audio_codec']), "-b:a", "192k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "CONVIRTIENDO AUDIO")
         else:
-            cmd = ["ffmpeg", "-y", "-i", final_input, "-vf", f"scale=-2:{settings['res']},format=yuv420p", "-c:v", "libx264", "-crf", str(settings['crf']), "-preset", str(settings['preset']), "-threads", "0", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
+            cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", f"scale=-2:{settings['res']},format=yuv420p", "-c:v", "libx264", "-crf", str(settings['crf']), "-preset", str(settings['preset']), "-threads", "0", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
             await ffmpeg_monitor(uid, msg, cmd, duration, settings, "COMPRIMIENDO VIDEO")
 
         if not os.path.exists(output_path):
