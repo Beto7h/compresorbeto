@@ -122,7 +122,7 @@ async def aria2_monitor(gid, msg, uid):
         except: break
     return False
 
-# --- 📥 LÓGICA DE LEECH ---
+# --- 📥 LÓGICA DE LEECH (ARIA2) ---
 async def download_link(url, custom_name, msg, uid):
     cancel_flags.discard(uid)
     try:
@@ -149,22 +149,58 @@ async def download_link(url, custom_name, msg, uid):
             new_path = os.path.join(BASE_DIR, f"in_{uid}_{safe_name}{ext}")
             os.rename(filename, new_path)
             
-            class FakeMessage:
-                def __init__(self, p, n, msg_obj):
-                    self.video = type('obj', (object,), {'file_name': n})
-                    self.document = None; self.chat = msg_obj.chat; self.from_user = msg_obj.from_user
-                    self.file_path = p
-                async def download(self, **kwargs): return self.file_path
-
-            if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
-            user_settings[uid]['orig_msg'] = FakeMessage(new_path, os.path.basename(new_path), msg)
-            await msg.edit(f"✅ **Leech Finalizado**\n\n📄 `{os.path.basename(new_path)}`", reply_markup=get_main_menu(uid))
+            await prepare_for_menu(new_path, msg, uid)
         else:
             await msg.edit("🛑 **Operación cancelada.**")
             cleanup(uid)
     except Exception as e:
         await msg.edit(f"❌ **Error en Leech:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado.**")
         cleanup(uid)
+
+# --- 📥 NUEVA LÓGICA DE YTL (YT-DLP) ---
+async def download_ytl(url, custom_name, msg, uid):
+    cancel_flags.discard(uid)
+    try:
+        # Preparamos el nombre seguro
+        safe_name = re.sub(r'[\\/*?:"<>|]', "", custom_name) if custom_name else f"ytl_{int(time.time())}"
+        output_template = os.path.join(BASE_DIR, f"in_{uid}_{safe_name}.%(ext)s")
+
+        # Configuración de yt-dlp
+        ydl_opts = {
+            'format': 'bestvideo+bestaudio/best',
+            'outtmpl': output_template,
+            'quiet': True,
+            'no_warnings': True,
+        }
+
+        await msg.edit(f"⏳ **yt-dlp:** Analizando y descargando...\n(Drive/GoFile/YT/etc)")
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Ejecutamos en un hilo para no bloquear asyncio
+            info = await asyncio.get_event_loop().run_in_executor(None, lambda: ydl.extract_info(url, download=True))
+            filename = ydl.prepare_filename(info)
+
+        if os.path.exists(filename):
+            await prepare_for_menu(filename, msg, uid)
+        else:
+            raise Exception("No se generó el archivo de salida.")
+
+    except Exception as e:
+        await msg.edit(f"❌ **Error en YTL:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado.**")
+        cleanup(uid)
+
+# --- 🛠️ UTILIDAD PARA LANZAR MENÚ TRAS DESCARGA ---
+async def prepare_for_menu(file_path, msg, uid):
+    class FakeMessage:
+        def __init__(self, p, n, msg_obj):
+            self.video = type('obj', (object,), {'file_name': n})
+            self.document = None; self.chat = msg_obj.chat; self.from_user = msg_obj.from_user
+            self.file_path = p
+        async def download(self, **kwargs): return self.file_path
+
+    if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
+    user_settings[uid]['orig_msg'] = FakeMessage(file_path, os.path.basename(file_path), msg)
+    await msg.edit(f"✅ **Descarga Finalizada**\n\n📄 `{os.path.basename(file_path)}`", reply_markup=get_main_menu(uid))
 
 # --- 📊 MONITOR FFMPEG (CADA 12 SEG) ---
 async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
@@ -216,7 +252,7 @@ async def process_logic(uid, msg, settings, mode):
     output_path = os.path.join(BASE_DIR, f"out_{uid}_{int(time.time())}{extension}")
 
     try:
-        # Descarga de Telegram si no es Leech
+        # Descarga de Telegram si no es Leech/Ytl
         if not os.path.exists(input_path):
             last_update_time[uid] = 0
             input_path = await orig_msg.download(
@@ -310,8 +346,18 @@ async def leech_handler(client, message):
     if not text: return await message.reply("⚠️ Uso: `/leech [url] -n [nombre]`")
     url = text.split(" -n ")[0].strip()
     name = text.split(" -n ")[1].strip() if " -n " in text else None
-    s_msg = await message.reply("⏳ **Analizando enlace en servidor...**")
+    s_msg = await message.reply("⏳ **Aria2:** Analizando enlace...")
     await download_link(url, name, s_msg, uid)
+
+@app.on_message(filters.command("ytl") & filters.private)
+async def ytl_handler(client, message):
+    uid = message.from_user.id
+    text = message.text.replace("/ytl", "").strip()
+    if not text: return await message.reply("⚠️ Uso: `/ytl [url] -n [nombre]`")
+    url = text.split(" -n ")[0].strip()
+    name = text.split(" -n ")[1].strip() if " -n " in text else None
+    s_msg = await message.reply("⏳ **yt-dlp:** Preparando motor...")
+    await download_ytl(url, name, s_msg, uid)
 
 @app.on_message((filters.video | filters.document) & filters.private)
 async def handle_input(client, message):
@@ -372,8 +418,9 @@ async def main_startup():
     system_startup_cleanup()
     await app.start()
     asyncio.create_task(worker())
-    print("🚀 Bot en Docker listo con barra de 12 segundos.")
+    print("🚀 Bot listo con Aria2 + yt-dlp (/ytl)")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
     app.run(main_startup())
+            
