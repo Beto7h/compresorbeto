@@ -1,4 +1,4 @@
-}import os, time, asyncio, psutil, shutil, subprocess, re, sys, yt_dlp
+import os, time, asyncio, psutil, shutil, subprocess, re, sys, yt_dlp
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from config import Config
