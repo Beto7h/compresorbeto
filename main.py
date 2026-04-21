@@ -1,4 +1,4 @@
-import os, time, asyncio, psutil, shutil, subprocess, re, sys, yt_dlp, aria2p, shlex
+import os, time, asyncio, psutil, shutil, subprocess, re, sys, yt_dlp, aria2p
 from pyrogram import Client, filters
 from pyrogram.errors import FloodWait
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
@@ -13,6 +13,7 @@ app = Client(
     api_id=Config.API_ID, 
     api_hash=Config.API_HASH, 
     bot_token=Config.BOT_TOKEN, 
+    session_string=Config.SESSION_STRING
 )
 
 # --- 🚀 INICIALIZACIÓN DE ARIA2P ---
@@ -39,10 +40,8 @@ DEFAULT_SETTINGS = {
 # --- 🛠️ UTILIDADES ---
 def system_startup_cleanup():
     for f in os.listdir(BASE_DIR):
-        if any(f.startswith(prefix) for prefix in ["in_", "out_", "thumb_"]) or f.endswith("_extracted"):
-            try:
-                if os.path.isdir(os.path.join(BASE_DIR, f)): shutil.rmtree(os.path.join(BASE_DIR, f))
-                else: os.remove(os.path.join(BASE_DIR, f))
+        if any(f.startswith(prefix) for prefix in ["in_", "out_", "thumb_"]):
+            try: os.remove(os.path.join(BASE_DIR, f))
             except: pass
 
 def get_sys_stats_raw():
@@ -53,11 +52,8 @@ def get_sys_stats_raw():
 
 def cleanup(uid):
     for f in os.listdir(BASE_DIR):
-        if str(uid) in f and any(x in f for x in ["in_", "out_", "thumb_", "_extracted"]):
-            try:
-                path = os.path.join(BASE_DIR, f)
-                if os.path.isdir(path): shutil.rmtree(path)
-                else: os.remove(path)
+        if str(uid) in f and any(x in f for x in ["in_", "out_", "thumb_"]):
+            try: os.remove(os.path.join(BASE_DIR, f))
             except: pass
 
 def get_duration(file):
@@ -74,51 +70,29 @@ def generate_thumbnail(video_path, uid):
         return thumb_path if os.path.exists(thumb_path) else None
     except: return None
 
-# --- 🧠 EXTRACTOR INTELIGENTE (YT-DLP) ---
-async def extract_smart_link(url):
-    if url.lower().endswith(('.mp4', '.mkv', '.avi', '.zip', '.rar', '.7z')):
-        return url, None
-    try:
-        ydl_opts = {'quiet': True, 'no_warnings': True, 'noplaylist': True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            loop = asyncio.get_event_loop()
-            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
-            return info.get('url'), info.get('title')
-    except: return url, None
-
-# --- 📦 EXTRACTOR DE COMPRIMIDOS ---
-async def run_extraction(file_path, password=None):
-    extract_dir = file_path + "_extracted"
-    os.makedirs(extract_dir, exist_ok=True)
-    cmd = ["7z", "x", file_path, f"-o{extract_dir}", "-y"]
-    if password: cmd.append(f"-p{password}")
-    
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0: return None, f"Error 7z: {proc.stderr}"
-        video_files = []
-        for root, _, files in os.walk(extract_dir):
-            for f in files:
-                if f.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.ts')):
-                    video_files.append(os.path.join(root, f))
-        return video_files, extract_dir
-    except Exception as e: return None, str(e)
-
-# --- 📊 BARRA DE PROGRESO UNIVERSAL ---
+# --- 📊 BARRA DE PROGRESO UNIVERSAL (CADA 12 SEG) ---
 async def progress_bar(current, total, msg, uid, type_label):
     now = time.time()
-    if (now - last_update_time.get(uid, 0)) < 12: return
+    if (now - last_update_time.get(uid, 0)) < 12:
+        return
     last_update_time[uid] = now
+    
     percentage = (current / total) * 100
     bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
-    tmp = (f"📂 **{type_label}**\n« {bar} »  **{percentage:.1f}%**\n\n"
+    
+    tmp = (f"📂 **{type_label}**\n"
+           f"« {bar} »  **{percentage:.1f}%**\n\n"
            f"📊 **DATOS:** `{current // (1024**2)}MB` / `{total // (1024**2)}MB`\n"
            f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
-    try: await msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 CANCELAR", callback_data=f"abort_{uid}")]]))
+    
+    try:
+        await msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 CANCELAR", callback_data=f"abort_{uid}")]]))
     except: pass
-    if uid in cancel_flags: raise Exception("USER_ABORTED")
 
-# --- 📊 MONITOR ARIA2 ---
+    if uid in cancel_flags:
+        raise Exception("USER_ABORTED")
+
+# --- 📊 MONITOR ARIA2 (CADA 12 SEG) ---
 async def aria2_monitor(gid, msg, uid):
     last_update_time[uid] = 0
     while True:
@@ -126,16 +100,21 @@ async def aria2_monitor(gid, msg, uid):
             download = aria2.get_download(gid)
             if download.is_complete: return True
             if download.is_removed: return False
+            
             now = time.time()
             if (now - last_update_time.get(uid, 0)) > 12:
                 last_update_time[uid] = now
                 percentage = download.progress
                 bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
+                
                 tmp = (f"📥 **LEECH (ARIA2)**\n« {bar} »  **{percentage:.1f}%**\n\n"
                        f"📊 **DATOS:** `{download.completed_length_string()}` / `{download.total_length_string()}`\n"
-                       f"🚀 **VEL:** `{download.download_speed_string()}`\n\n🧪 **SISTEMA**\n{get_sys_stats_raw()}")
+                       f"🚀 **VEL:** `{download.download_speed_string()}` | ⏳ **ETA:** `{download.eta_string()}`\n\n"
+                       f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
+                
                 try: await msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 CANCELAR", callback_data=f"abort_{uid}")]]))
                 except: pass
+            
             if uid in cancel_flags:
                 aria2.remove([download], force=True, files=True)
                 return False
@@ -144,86 +123,82 @@ async def aria2_monitor(gid, msg, uid):
     return False
 
 # --- 📥 LÓGICA DE LEECH ---
-async def download_link(url, custom_name, msg, uid, extract_mode=False, password=None):
+async def download_link(url, custom_name, msg, uid):
     cancel_flags.discard(uid)
     try:
-        await msg.edit("🔎 **Analizando enlace inteligente...**")
-        direct_url, ext_name = await extract_smart_link(url)
-        
-        download = aria2.add_uris([direct_url])
-        success = await aria2_monitor(download.gid, msg, uid)
+        download = aria2.add_uris([url])
+        gid = download.gid
+        success = await aria2_monitor(gid, msg, uid)
         
         if success:
             await asyncio.sleep(2)
-            download = aria2.get_download(download.gid)
-            filename = download.files[0].path
+            download = aria2.get_download(gid)
+            file_basename = os.path.basename(download.files[0].path)
+            filename = os.path.join(BASE_DIR, file_basename)
             
-            if extract_mode:
-                await msg.edit("📦 **Extrayendo archivos...**")
-                videos, e_dir = await run_extraction(filename, password)
-                if not videos:
-                    await msg.edit(f"❌ No se encontraron videos en el comprimido.")
-                    return cleanup(uid)
-                
-                # Menú de selección
-                buttons = [[InlineKeyboardButton(f"🎬 {os.path.basename(v)[:20]}", callback_data=f"sel_{idx}")] for idx, v in enumerate(videos)]
-                buttons.append([InlineKeyboardButton("❌ CANCELAR", callback_data=f"abort_{uid}")])
-                user_settings[uid]['pending_videos'] = videos
-                user_settings[uid]['extract_dir'] = e_dir
-                await msg.edit("✅ **Extracción lista.** Selecciona el video:", reply_markup=InlineKeyboardMarkup(buttons))
-            else:
-                # Flujo normal
-                ext = os.path.splitext(filename)[1] or ".mp4"
-                safe_name = re.sub(r'[\\/*?:"<>|]', "", custom_name or ext_name or f"file_{int(time.time())}")
-                new_path = os.path.join(BASE_DIR, f"in_{uid}_{safe_name}{ext}")
-                os.rename(filename, new_path)
-                
-                setup_fake_msg(uid, new_path, msg)
-                await msg.edit(f"✅ **Leech Finalizado**\n\n📄 `{os.path.basename(new_path)}`", reply_markup=get_main_menu(uid))
+            if not os.path.exists(filename):
+                for root, _, files in os.walk(BASE_DIR):
+                    if file_basename in files:
+                        filename = os.path.join(root, file_basename)
+                        break
+            
+            if not os.path.exists(filename): raise Exception(f"No encontré el archivo `{file_basename}`")
+
+            ext = os.path.splitext(filename)[1] or ".mp4"
+            safe_name = re.sub(r'[\\/*?:"<>|]', "", custom_name) if custom_name else f"download_{int(time.time())}"
+            new_path = os.path.join(BASE_DIR, f"in_{uid}_{safe_name}{ext}")
+            os.rename(filename, new_path)
+            
+            class FakeMessage:
+                def __init__(self, p, n, msg_obj):
+                    self.video = type('obj', (object,), {'file_name': n})
+                    self.document = None; self.chat = msg_obj.chat; self.from_user = msg_obj.from_user
+                    self.file_path = p
+                async def download(self, **kwargs): return self.file_path
+
+            if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
+            user_settings[uid]['orig_msg'] = FakeMessage(new_path, os.path.basename(new_path), msg)
+            await msg.edit(f"✅ **Leech Finalizado**\n\n📄 `{os.path.basename(new_path)}`", reply_markup=get_main_menu(uid))
         else:
             await msg.edit("🛑 **Operación cancelada.**")
             cleanup(uid)
     except Exception as e:
-        await msg.edit(f"❌ **Error:** `{str(e)}`")
+        await msg.edit(f"❌ **Error en Leech:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado.**")
         cleanup(uid)
 
-def setup_fake_msg(uid, path, msg):
-    class FakeMessage:
-        def __init__(self, p, n, msg_obj):
-            self.video = type('obj', (object,), {'file_name': n})
-            self.document = None; self.chat = msg_obj.chat; self.from_user = msg_obj.from_user
-            self.file_path = p
-        async def download(self, **kwargs): return self.file_path
-    if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
-    user_settings[uid]['orig_msg'] = FakeMessage(path, os.path.basename(path), msg)
-
-# --- 📊 MONITOR FFMPEG ---
+# --- 📊 MONITOR FFMPEG (CADA 12 SEG) ---
 async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     active_processes[uid] = proc
     start_time = time.time()
     last_update = 0
+    
     while True:
         line = await proc.stdout.readline()
         if not line: break
         text = line.decode("utf-8")
+        
         if "out_time_ms=" in text:
             try:
                 ms = int(text.split("=")[1])
                 current_time_sec = ms / 1000000
                 now = time.time()
+                
                 if duration > 0 and (now - last_update) > 12:
                     percentage = min((current_time_sec / duration) * 100, 100)
-                    speed = current_time_sec / (now - start_time) if (now - start_time) > 0 else 0
-                    eta = time.strftime('%H:%M:%S', time.gmtime((duration - current_time_sec) / speed)) if speed > 0 else "00:00:00"
+                    speed_factor = current_time_sec / (now - start_time) if (now - start_time) > 0 else 0
+                    eta_sec = (duration - current_time_sec) / speed_factor if speed_factor > 0 else 0
+                    eta = time.strftime('%H:%M:%S', time.gmtime(eta_sec))
                     bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
+                    
                     tmp = (f"⚙️ **{mode_label}**\n« {bar} »  **{percentage:.1f}%**\n\n"
-                           f"⚡ **PRESET:** `{settings['v_label']}` | 🚀 **V-ETA:** `{speed:.2f}x`\n"
+                           f"⚡ **PRESET:** `{settings['v_label']}` | 🚀 **V-ETA:** `{speed_factor:.2f}x`\n"
                            f"⏳ **RESTANTE:** `{eta}`\n\n🧪 **SISTEMA**\n{get_sys_stats_raw()}")
                     try: await msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]]))
                     except: pass
                     last_update = now
             except: pass
+            
         if uid in cancel_flags:
             try: proc.terminate()
             except: pass
@@ -236,108 +211,156 @@ async def process_logic(uid, msg, settings, mode):
     raw_name = getattr(orig_msg.video, 'file_name', None) or getattr(orig_msg.document, 'file_name', None) or "video.mp4"
     ext_orig = os.path.splitext(raw_name)[1] or ".mp4"
     extension = ext_orig if settings.get('keep_format', True) else ".mp4"
+    
     input_path = getattr(orig_msg, 'file_path', os.path.join(BASE_DIR, f"in_{uid}_{int(time.time())}{ext_orig}"))
     output_path = os.path.join(BASE_DIR, f"out_{uid}_{int(time.time())}{extension}")
 
     try:
+        # Descarga de Telegram si no es Leech
         if not os.path.exists(input_path):
-            input_path = await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, uid, "DESCARGANDO"))
+            last_update_time[uid] = 0
+            input_path = await orig_msg.download(
+                file_name=input_path,
+                progress=progress_bar,
+                progress_args=(msg, uid, "DESCARGANDO DE TG")
+            )
         
         duration = get_duration(input_path)
         if mode == "audio_only":
             cmd = ["ffmpeg", "-y", "-i", input_path, "-vn", "-c:a", str(settings['audio_codec']), "-b:a", "192k", "-progress", "pipe:1", output_path]
-            label = "AUDIO"
+            label = "EXTRAER AUDIO"
         else:
             cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", f"scale=-2:{settings['res']}", "-c:v", "libx264", "-crf", str(settings['crf']), "-preset", str(settings['preset']), "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
             label = "COMPRIMIENDO"
 
         await ffmpeg_monitor(uid, msg, cmd, duration, settings, label)
+
         if os.path.exists(output_path):
-            await app.send_video(chat_id=uid, video=output_path, duration=int(get_duration(output_path)), thumb=generate_thumbnail(output_path, uid), file_name=raw_name, supports_streaming=True, caption=f"✅ **Procesado**", progress=progress_bar, progress_args=(msg, uid, "SUBIENDO"))
+            last_update_time[uid] = 0
+            await app.send_video(
+                chat_id=uid, 
+                video=output_path, 
+                duration=int(get_duration(output_path)), 
+                thumb=generate_thumbnail(output_path, uid), 
+                file_name=raw_name, 
+                supports_streaming=True,
+                caption=f"✅ **Procesado con Éxito**\n\n📄 `{raw_name}`",
+                progress=progress_bar,
+                progress_args=(msg, uid, "SUBIENDO A TG")
+            )
         try: await msg.delete()
         except: pass
-    except Exception as e: await msg.edit(f"❌ Error: `{e}`")
-    finally: active_processes.pop(uid, None); cleanup(uid)
+
+    except Exception as e:
+        await msg.edit(f"❌ **Error:** `{e}`" if "USER_ABORTED" not in str(e) else "❌ **Cancelado.**")
+    finally:
+        active_processes.pop(uid, None)
+        cleanup(uid)
 
 # --- MENÚS ---
 def get_config_summary(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
-    return (f"📝 **CONFIGURACIÓN:**\n"
-            f"💎 Calidad: `{s['q_label']}` | 📏 Res: `{s['res']}p`\n"
-            f"⚡ Preset: `{s['v_label']}` | 🎵 Audio: `{s['a_label']}`")
+    return (f"📝 **CONFIGURACIÓN ACTUAL:**\n━━━━━━━━━━━━━━━━━━━━\n"
+            f"💎 **Calidad:** `{s['q_label']}` | 📏 **Res:** `{s['res']}p`\n"
+            f"⚡ **Preset:** `{s['v_label']}` | 🎵 **Audio:** `{s['a_label']}`\n━━━━━━━━━━━━━━━━━━━━")
 
 def get_main_menu(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
+    keep_v = "✅ " if s.get('keep_format', True) else ""
+    force_v = "✅ " if not s.get('keep_format', True) else ""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎞️ AJUSTES", callback_data="menu_settings")],
-        [InlineKeyboardButton("🚀 INICIAR", callback_data="run_comp")],
-        [InlineKeyboardButton("⚡ SOLO AUDIO", callback_data="run_audio_only")]
+        [InlineKeyboardButton("🎞️ AJUSTES AVANZADOS", callback_data="menu_settings")],
+        [InlineKeyboardButton("🚀 INICIAR COMPRESIÓN", callback_data="run_comp")],
+        [InlineKeyboardButton(f"{'✅ ' if s.get('a_label')=='MP3' else ''}MP3", callback_data="set_aud_libmp3lame_MP3"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('a_label')=='AAC' else ''}AAC", callback_data="set_aud_aac_AAC")],
+        [InlineKeyboardButton(f"{keep_v}ORIGINAL", callback_data="mode_keep"),
+         InlineKeyboardButton(f"{force_v}MP4", callback_data="mode_mp4")],
+        [InlineKeyboardButton("⚡ SOLO EXTRAER AUDIO", callback_data="run_audio_only")]
     ])
 
 def get_settings_menu(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"Calidad: {s['q_label']}", callback_data="n")],
-        [InlineKeyboardButton("Baja", callback_data="set_q_30"), InlineKeyboardButton("Estd", callback_data="set_q_24"), InlineKeyboardButton("Súper", callback_data="set_q_18")],
-        [InlineKeyboardButton(f"Res: {s['res']}p", callback_data="n")],
-        [InlineKeyboardButton("480p", callback_data="set_r_480"), InlineKeyboardButton("720p", callback_data="set_r_720"), InlineKeyboardButton("1080p", callback_data="set_r_1080")],
-        [InlineKeyboardButton("⬅️ VOLVER", callback_data="menu_main")]
+        [InlineKeyboardButton("── CALIDAD ──", callback_data="n")],
+        [InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Baja' else ''}Baja", callback_data="set_q_30"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Estándar' else ''}Estándar", callback_data="set_q_24"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Súper' else ''}Súper", callback_data="set_q_18")],
+        [InlineKeyboardButton("── RESOLUCIÓN ──", callback_data="n")],
+        [InlineKeyboardButton(f"{'✅ ' if s.get('res')=='480' else ''}480p", callback_data="set_r_480"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('res')=='720' else ''}720p", callback_data="set_r_720"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('res')=='1080' else ''}1080p", callback_data="set_r_1080")],
+        [InlineKeyboardButton("── VELOCIDAD ──", callback_data="n")],
+        [InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Lento' else ''}Lento", callback_data="set_v_slower_Lento"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Medio' else ''}Medio", callback_data="set_v_medium_Medio"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Ultra' else ''}Ultra", callback_data="set_v_ultrafast_Ultra")],
+        [InlineKeyboardButton("⬅️ VOLVER AL INICIO", callback_data="menu_main")]
     ])
 
 # --- MANEJADORES ---
+@app.on_message(filters.command("start"))
+async def start_cmd(client, message):
+    uid = message.from_user.id
+    if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
+    await message.reply(f"✨ **Compresor Élite Activo**\n\n{get_sys_stats_raw()}")
+
 @app.on_message(filters.command("leech") & filters.private)
 async def leech_handler(client, message):
     uid = message.from_user.id
-    try: args = shlex.split(message.text)
-    except: args = message.text.split()
-    
-    if len(args) < 2: return await message.reply("⚠️ `/leech [url] [-e pass]`")
-    url = args[1]
-    extract_mode = "-e" in args
-    password = args[args.index("-e")+1] if extract_mode and len(args) > args.index("-e")+1 else None
-    
-    s_msg = await message.reply("⏳ **Iniciando...**")
-    await download_link(url, None, s_msg, uid, extract_mode, password)
+    text = message.text.replace("/leech", "").strip()
+    if not text: return await message.reply("⚠️ Uso: `/leech [url] -n [nombre]`")
+    url = text.split(" -n ")[0].strip()
+    name = text.split(" -n ")[1].strip() if " -n " in text else None
+    s_msg = await message.reply("⏳ **Analizando enlace en servidor...**")
+    await download_link(url, name, s_msg, uid)
 
 @app.on_message((filters.video | filters.document) & filters.private)
 async def handle_input(client, message):
     uid = message.from_user.id
     user_settings[uid] = DEFAULT_SETTINGS.copy()
     user_settings[uid]['orig_msg'] = message
-    await message.reply(f"🎬 **Archivo**\n\n{get_config_summary(uid)}", reply_markup=get_main_menu(uid))
+    await message.reply(f"🎬 **Archivo recibido**\n\n{get_config_summary(uid)}", reply_markup=get_main_menu(uid))
 
 @app.on_callback_query()
 async def cb_handler(client, query):
     uid, data = query.from_user.id, query.data
     await query.answer()
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
-
-    if data.startswith("sel_"):
-        idx = int(data.split("_")[1])
-        video_path = user_settings[uid]['pending_videos'][idx]
-        e_dir = user_settings[uid]['extract_dir']
-        final_path = os.path.join(BASE_DIR, f"in_{uid}_ext_{os.path.basename(video_path)}")
-        os.rename(video_path, final_path)
-        shutil.rmtree(e_dir, ignore_errors=True)
-        setup_fake_msg(uid, final_path, query.message)
-        await query.message.edit(f"🎬 **Seleccionado:** `{os.path.basename(final_path)}`", reply_markup=get_main_menu(uid))
+    
+    changed = False
+    if data.startswith("set_q_"):
+        val = data.split("_")[2]
+        user_settings[uid]['crf'] = val
+        user_settings[uid]['q_label'] = {"30":"Baja", "24":"Estándar", "18":"Súper"}[val]
+        changed = True
+    elif data.startswith("set_r_"): user_settings[uid]['res'] = data.split("_")[2]; changed = True
+    elif data.startswith("set_v_"):
+        parts = data.split("_"); user_settings[uid]['preset'], user_settings[uid]['v_label'] = parts[2], parts[3]
+        changed = True
+    elif data.startswith("set_aud_"):
+        parts = data.split("_"); user_settings[uid]['audio_codec'], user_settings[uid]['a_label'] = parts[2], parts[3]
+        changed = True
+    elif data == "mode_keep": user_settings[uid]['keep_format'] = True; changed = True
+    elif data == "mode_mp4": user_settings[uid]['keep_format'] = False; changed = True
+    elif data == "run_comp":
+        cancel_flags.discard(uid)
+        await processing_queue.put((uid, query.message, user_settings[uid].copy(), "comp"))
+        await query.message.edit("⏳ **En cola de compresión...**"); return
+    elif data == "run_audio_only":
+        cancel_flags.discard(uid)
+        await processing_queue.put((uid, query.message, user_settings[uid].copy(), "audio_only"))
+        await query.message.edit("⏳ **En cola de audio...**"); return
+    elif data.startswith("abort_"):
+        cancel_flags.add(uid)
+        if uid in active_processes:
+            try: active_processes[uid].terminate()
+            except: pass
         return
 
-    if data == "run_comp":
-        await processing_queue.put((uid, query.message, user_settings[uid].copy(), "comp"))
-        await query.message.edit("⏳ **En cola...**")
-    elif data == "abort_":
-        cancel_flags.add(uid)
-        if uid in active_processes: active_processes[uid].terminate()
-    elif data == "menu_settings":
-        await query.message.edit(get_config_summary(uid), reply_markup=get_settings_menu(uid))
-    elif data == "menu_main":
-        await query.message.edit(get_config_summary(uid), reply_markup=get_main_menu(uid))
-    elif data.startswith("set_"):
-        # Lógica de cambio de ajustes (simplificada)
-        if "_q_" in data: user_settings[uid]['crf'] = data.split("_")[2]; user_settings[uid]['q_label'] = "Cambid"
-        if "_r_" in data: user_settings[uid]['res'] = data.split("_")[2]
-        await query.message.edit(get_config_summary(uid), reply_markup=get_settings_menu(uid))
+    if changed or "menu_" in data:
+        text = f"🛠️ **Ajustes de Video**\n\n{get_config_summary(uid)}" if "settings" in data or "set_" in data else f"🎬 **Menú Principal**\n\n{get_config_summary(uid)}"
+        markup = get_settings_menu(uid) if "settings" in data or "set_" in data else get_main_menu(uid)
+        try: await query.message.edit(text, reply_markup=markup)
+        except: pass
 
 async def worker():
     while True:
@@ -349,7 +372,7 @@ async def main_startup():
     system_startup_cleanup()
     await app.start()
     asyncio.create_task(worker())
-    print("🚀 Bot Activo con Leech Inteligente y Extractor.")
+    print("🚀 Bot en Docker listo con barra de 12 segundos.")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
