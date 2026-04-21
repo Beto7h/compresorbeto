@@ -83,17 +83,23 @@ async def progress_bar(current, total, status_msg, start_time, action):
         try: await status_msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]]))
         except: pass
 
-# --- 📥 LÓGICA DE LEECH CON PROGRESO ---
+# --- 📥 LÓGICA DE LEECH CON PROGRESO CORREGIDA ---
 async def download_link(url, custom_name, msg, uid):
     last_update_time[uid] = 0
     start_time = time.time()
+    # Capturamos el bucle de eventos del hilo principal
+    loop = asyncio.get_running_loop()
 
     def ytdl_hook(d):
         if d['status'] == 'downloading':
             current = d.get('downloaded_bytes', 0)
             total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
             if total > 0:
-                asyncio.run_coroutine_threadsafe(progress_bar(current, total, msg, start_time, "LEECH (DESCARGANDO)"), asyncio.get_event_loop())
+                # Enviamos la actualización al hilo principal de forma segura
+                asyncio.run_coroutine_threadsafe(
+                    progress_bar(current, total, msg, start_time, "LEECH (DESCARGANDO)"), 
+                    loop
+                )
 
     ydl_opts = {
         'outtmpl': f"in_{uid}_{int(time.time())}_%(title)s.%(ext)s",
@@ -102,8 +108,8 @@ async def download_link(url, custom_name, msg, uid):
     }
 
     try:
-        loop = asyncio.get_event_loop()
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Ejecutamos la extracción/descarga en un hilo separado para no congelar el bot
             info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
             filename = ydl.prepare_filename(info)
 
@@ -189,7 +195,7 @@ async def process_logic(uid, msg, settings, mode):
     finally:
         active_processes.pop(uid, None); cleanup(uid)
 
-# --- [FUNCIONES DE MENÚS IGUALES A TU ORIGINAL] ---
+# --- FUNCIONES DE MENÚS ---
 def get_config_summary(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
     f_label = "Original" if s.get('keep_format', True) else "MP4"
