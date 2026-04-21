@@ -231,6 +231,7 @@ async def process_logic(uid, msg, settings, mode):
                 "-vf", f"{scale},format=yuv420p",
                 "-c:v", "libx264", "-crf", str(settings['crf']),
                 "-preset", str(settings['preset']),
+                "-threads", "0",
                 "-profile:v", "high", "-level", "4.1", 
                 "-c:a", "aac", "-b:a", "128k",
                 "-movflags", "+faststart", 
