@@ -436,4 +436,31 @@ async def cb_handler(client, query):
     elif data == "run_audio_only":
         cancel_flags.discard(uid)
         await processing_queue.put((uid, query.message, user_settings[uid].copy(), "audio_only"))
-        await query.mes
+        await query.message.edit("⏳ **En cola de audio...**")
+    elif data.startswith("abort_"):
+        cancel_flags.add(uid)
+        if uid in active_processes:
+            try: active_processes[uid].terminate()
+            except: pass
+        await query.message.edit("🛑 **Abortando proceso...**")
+
+    if changed:
+        try: await query.message.edit(get_config_summary(uid), reply_markup=get_main_menu(uid))
+        except: pass
+
+async def worker():
+    while True:
+        uid, msg, settings, mode = await processing_queue.get()
+        try: await process_logic(uid, msg, settings, mode)
+        except: pass
+        processing_queue.task_done()
+
+async def main_startup():
+    system_startup_cleanup()
+    await app.start()
+    asyncio.create_task(worker())
+    print("🚀 BOT INICIADO")
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    app.run(main_startup())
