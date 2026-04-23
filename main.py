@@ -37,7 +37,7 @@ DEFAULT_SETTINGS = {
     'keep_format': True
 }
 
-# --- 📊 LOGGER PARA YT-DLP ---
+# --- 📊 LOGGER PARA YT-DLP (BARRA DE PROGRESO) ---
 class YTLProgressLogger:
     def __init__(self, msg, uid, loop):
         self.msg = msg
@@ -215,7 +215,7 @@ async def prepare_for_menu(file_path, msg, uid):
     user_settings[uid]['orig_msg'] = FakeMessage(file_path, os.path.basename(file_path), msg)
     await msg.edit(f"✅ **Descarga Finalizada**\n\n📄 `{os.path.basename(file_path)}`", reply_markup=get_main_menu(uid))
 
-# --- 📊 MONITOR FFMPEG ---
+# --- 📊 MONITOR FFMPEG (CADA 12 SEG) ---
 async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     active_processes[uid] = proc
@@ -237,7 +237,7 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
                     eta = time.strftime('%H:%M:%S', time.gmtime(eta_sec))
                     bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
                     tmp = (f"⚙️ **{mode_label}**\n« {bar} »  **{percentage:.1f}%**\n\n"
-                           f"⚡ **MODO:** `x265 Smart` | 🚀 **V-ETA:** `{speed_factor:.2f}x`\n"
+                           f"⚡ **PRESET:** `{settings['v_label']}` | 🚀 **V-ETA:** `{speed_factor:.2f}x`\n"
                            f"⏳ **RESTANTE:** `{eta}`\n\n🧪 **SISTEMA**\n{get_sys_stats_raw()}")
                     try: await msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]]))
                     except: pass
@@ -254,9 +254,7 @@ async def process_logic(uid, msg, settings, mode):
     orig_msg = settings['orig_msg']
     raw_name = getattr(orig_msg.video, 'file_name', None) or getattr(orig_msg.document, 'file_name', None) or "video.mp4"
     ext_orig = os.path.splitext(raw_name)[1] or ".mp4"
-    
-    # Inteligente mantiene extensión original y audio original
-    extension = ext_orig if (settings.get('keep_format', True) or mode == "smart") else ".mp4"
+    extension = ext_orig if settings.get('keep_format', True) else ".mp4"
     input_path = getattr(orig_msg, 'file_path', os.path.join(BASE_DIR, f"in_{uid}_{int(time.time())}{ext_orig}"))
     output_path = os.path.join(BASE_DIR, f"out_{uid}_{int(time.time())}{extension}")
 
@@ -266,30 +264,14 @@ async def process_logic(uid, msg, settings, mode):
             input_path = await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, uid, "DESCARGANDO DE TG"))
         
         duration = get_duration(input_path)
-        
         if mode == "audio_only":
             cmd = ["ffmpeg", "-y", "-i", input_path, "-vn", "-c:a", str(settings['audio_codec']), "-b:a", "192k", "-progress", "pipe:1", output_path]
             label = "EXTRAER AUDIO"
         elif mode == "smart":
-            # --- COMPRESIÓN QUIRÚRGICA 1.9GB ---
-            target_size_bytes = 1900 * 1024 * 1024 
-            if duration > 0:
-                # Estimamos bitrate para que quepa en 1.9GB
-                video_bitrate = int((target_size_bytes * 8) / duration) - 128000 # Margen para audio
-                video_bitrate = max(video_bitrate, 800000) # Mínimo 800kbps
-            else:
-                video_bitrate = 2500000
-
-            cmd = [
-                "ffmpeg", "-y", "-i", input_path,
-                "-c:v", "libx265", "-b:v", str(video_bitrate),
-                "-maxrate", str(int(video_bitrate * 1.5)), "-bufsize", str(int(video_bitrate * 2)),
-                "-preset", "slower", "-pix_fmt", "yuv420p",
-                "-c:a", "copy", # COPIAR AUDIO ORIGINAL
-                "-map", "0",    # COPIAR TODO (SUBTÍTULOS, ETC)
-                "-progress", "pipe:1", output_path
-            ]
-            label = "💎 COMPRESIÓN INTELIGENTE"
+            # --- COMPRESIÓN QUIRÚRGICA x265 ---
+            v_bitrate = int((1900 * 1024 * 1024 * 8) / duration) - 128000 if duration > 0 else 2500000
+            cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "libx265", "-b:v", str(v_bitrate), "-preset", "slower", "-c:a", "copy", "-progress", "pipe:1", output_path]
+            label = "💎 COMPRESIÓN SMART"
         else:
             cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", f"scale=-2:{settings['res']}", "-c:v", "libx264", "-crf", str(settings['crf']), "-preset", str(settings['preset']), "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
             label = "COMPRIMIENDO"
@@ -303,7 +285,7 @@ async def process_logic(uid, msg, settings, mode):
                 duration=int(get_duration(output_path)), 
                 thumb=generate_thumbnail(output_path, uid), 
                 file_name=raw_name, supports_streaming=True,
-                caption=f"✅ **Compresión Quirúrgica Finalizada**\n\n📄 `{raw_name}`",
+                caption=f"✅ **Procesado con Éxito**\n\n📄 `{raw_name}`",
                 progress=progress_bar, progress_args=(msg, uid, "SUBIENDO A TG")
             )
         try: await msg.delete()
@@ -326,12 +308,12 @@ def get_main_menu(uid):
     force_v = "✅ " if not s.get('keep_format', True) else ""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎞️ AJUSTES AVANZADOS", callback_data="menu_settings")],
-        [InlineKeyboardButton("💎 MODO INTELIGENTE (<2GB)", callback_data="run_smart")],
-        [InlineKeyboardButton("🚀 INICIAR ESTÁNDAR", callback_data="run_comp")],
-        [InlineKeyboardButton(f"{'✅ ' if s.get('a_label')=='MP3' else ''}MP3", callback_data="set_aud_libmp3lame_MP3_main"),
-         InlineKeyboardButton(f"{'✅ ' if s.get('a_label')=='AAC' else ''}AAC", callback_data="set_aud_aac_AAC_main")],
-        [InlineKeyboardButton(f"{keep_v}ORIGINAL", callback_data="mode_keep_main"),
-         InlineKeyboardButton(f"{force_v}MP4", callback_data="mode_mp4_main")],
+        [InlineKeyboardButton("💎 MODO SMART (<2GB)", callback_data="run_smart")],
+        [InlineKeyboardButton("🚀 INICIAR COMPRESIÓN", callback_data="run_comp")],
+        [InlineKeyboardButton(f"{'✅ ' if s.get('a_label')=='MP3' else ''}MP3", callback_data="set_aud_libmp3lame_MP3"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('a_label')=='AAC' else ''}AAC", callback_data="set_aud_aac_AAC")],
+        [InlineKeyboardButton(f"{keep_v}ORIGINAL", callback_data="mode_keep"),
+         InlineKeyboardButton(f"{force_v}MP4", callback_data="mode_mp4")],
         [InlineKeyboardButton("⚡ SOLO EXTRAER AUDIO", callback_data="run_audio_only")]
     ])
 
@@ -339,18 +321,18 @@ def get_settings_menu(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("── CALIDAD ──", callback_data="n")],
-        [InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Baja' else ''}Baja", callback_data="set_q_30_adv"),
-         InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Estándar' else ''}Estándar", callback_data="set_q_24_adv"),
-         InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Súper' else ''}Súper", callback_data="set_q_18_adv")],
+        [InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Baja' else ''}Baja", callback_data="set_q_30"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Estándar' else ''}Estándar", callback_data="set_q_24"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('q_label')=='Súper' else ''}Súper", callback_data="set_q_18")],
         [InlineKeyboardButton("── RESOLUCIÓN ──", callback_data="n")],
-        [InlineKeyboardButton(f"{'✅ ' if s.get('res')=='480' else ''}480p", callback_data="set_r_480_adv"),
-         InlineKeyboardButton(f"{'✅ ' if s.get('res')=='720' else ''}720p", callback_data="set_r_720_adv"),
-         InlineKeyboardButton(f"{'✅ ' if s.get('res')=='1080' else ''}1080p", callback_data="set_r_1080_adv")],
+        [InlineKeyboardButton(f"{'✅ ' if s.get('res')=='480' else ''}480p", callback_data="set_r_480"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('res')=='720' else ''}720p", callback_data="set_r_720"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('res')=='1080' else ''}1080p", callback_data="set_r_1080")],
         [InlineKeyboardButton("── VELOCIDAD ──", callback_data="n")],
-        [InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Lento' else ''}Lento", callback_data="set_v_slower_Lento_adv"),
-         InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Medio' else ''}Medio", callback_data="set_v_medium_Medio_adv"),
-         InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Ultra' else ''}Ultra", callback_data="set_v_ultrafast_Ultra_adv")],
-        [InlineKeyboardButton("⬅️ REGRESAR", callback_data="menu_main")]
+        [InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Lento' else ''}Lento", callback_data="set_v_slower_Lento"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Medio' else ''}Medio", callback_data="set_v_medium_Medio"),
+         InlineKeyboardButton(f"{'✅ ' if s.get('v_label')=='Ultra' else ''}Ultra", callback_data="set_v_ultrafast_Ultra")],
+        [InlineKeyboardButton("⬅️ VOLVER AL INICIO", callback_data="menu_main")]
     ])
 
 # --- MANEJADORES ---
@@ -359,6 +341,26 @@ async def start_cmd(client, message):
     uid = message.from_user.id
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
     await message.reply(f"✨ **Compresor Élite Activo**\n\n{get_sys_stats_raw()}")
+
+@app.on_message(filters.command("leech") & filters.private)
+async def leech_handler(client, message):
+    uid = message.from_user.id
+    text = message.text.replace("/leech", "").strip()
+    if not text: return await message.reply("⚠️ Uso: `/leech [url] -n [nombre]`")
+    url = text.split(" -n ")[0].strip()
+    name = text.split(" -n ")[1].strip() if " -n " in text else None
+    s_msg = await message.reply("⏳ **Aria2:** Analizando enlace...")
+    await download_link(url, name, s_msg, uid)
+
+@app.on_message(filters.command("ytl") & filters.private)
+async def ytl_handler(client, message):
+    uid = message.from_user.id
+    text = message.text.replace("/ytl", "").strip()
+    if not text: return await message.reply("⚠️ Uso: `/ytl [url] -n [nombre]`")
+    url = text.split(" -n ")[0].strip()
+    name = text.split(" -n ")[1].strip() if " -n " in text else None
+    s_msg = await message.reply("⏳ **YTL:** Preparando descarga...")
+    await download_ytl(url, name, s_msg, uid)
 
 @app.on_message((filters.video | filters.document) & filters.private)
 async def handle_input(client, message):
@@ -373,33 +375,25 @@ async def cb_handler(client, query):
     await query.answer()
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
     
-    # Manejo de persistencia de menús
-    is_adv = "_adv" in data
-    
+    changed = False
     if data.startswith("set_q_"):
         val = data.split("_")[2]
-        user_settings[uid]['crf'], user_settings[uid]['q_label'] = val, {"30":"Baja", "24":"Estándar", "18":"Súper"}[val]
-    elif data.startswith("set_r_"): user_settings[uid]['res'] = data.split("_")[2]
+        user_settings[uid]['crf'] = val
+        user_settings[uid]['q_label'] = {"30":"Baja", "24":"Estándar", "18":"Súper"}[val]; changed = True
+    elif data.startswith("set_r_"): user_settings[uid]['res'] = data.split("_")[2]; changed = True
     elif data.startswith("set_v_"):
-        parts = data.split("_"); user_settings[uid]['preset'], user_settings[uid]['v_label'] = parts[2], parts[3]
+        parts = data.split("_"); user_settings[uid]['preset'], user_settings[uid]['v_label'] = parts[2], parts[3]; changed = True
     elif data.startswith("set_aud_"):
-        parts = data.split("_"); user_settings[uid]['audio_codec'], user_settings[uid]['a_label'] = parts[2], parts[3]
-    elif data.startswith("mode_keep"): user_settings[uid]['keep_format'] = True
-    elif data.startswith("mode_mp4"): user_settings[uid]['keep_format'] = False
-
-    # Lógica de refresco de interfaz
-    if is_adv:
-        await query.message.edit(get_config_summary(uid), reply_markup=get_settings_menu(uid))
-    elif any(x in data for x in ["_main", "set_", "mode_"]) and "run" not in data:
-        await query.message.edit(get_config_summary(uid), reply_markup=get_main_menu(uid))
-
-    if data == "menu_settings":
+        parts = data.split("_"); user_settings[uid]['audio_codec'], user_settings[uid]['a_label'] = parts[2], parts[3]; changed = True
+    elif data == "mode_keep": user_settings[uid]['keep_format'] = True; changed = True
+    elif data == "mode_mp4": user_settings[uid]['keep_format'] = False; changed = True
+    elif data == "menu_settings":
         await query.message.edit(get_config_summary(uid), reply_markup=get_settings_menu(uid))
     elif data == "menu_main":
         await query.message.edit(get_config_summary(uid), reply_markup=get_main_menu(uid))
     elif data == "run_smart":
         cancel_flags.discard(uid); await processing_queue.put((uid, query.message, user_settings[uid].copy(), "smart"))
-        await query.message.edit("⏳ **Calculando compresión inteligente...**")
+        await query.message.edit("⏳ **En cola: Smart x265...**")
     elif data == "run_comp":
         cancel_flags.discard(uid); await processing_queue.put((uid, query.message, user_settings[uid].copy(), "comp"))
         await query.message.edit("⏳ **En cola de compresión...**")
@@ -412,6 +406,14 @@ async def cb_handler(client, query):
             try: active_processes[uid].terminate()
             except: pass
         await query.message.edit("🛑 **Abortando proceso...**")
+
+    if changed:
+        try:
+            # Detectar si estamos en el menú de ajustes o el principal para refrescar correctamente
+            is_in_settings = query.message.reply_markup.inline_keyboard[0][0].text == "── CALIDAD ──"
+            markup = get_settings_menu(uid) if is_in_settings else get_main_menu(uid)
+            await query.message.edit(get_config_summary(uid), reply_markup=markup)
+        except: pass
 
 async def worker():
     while True:
