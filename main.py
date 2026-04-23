@@ -163,7 +163,6 @@ async def download_link(url, custom_name, msg, uid):
             file_basename = os.path.basename(download.files[0].path)
             filename = os.path.join(BASE_DIR, file_basename)
             ext = os.path.splitext(filename)[1] or ".mp4"
-            # Renombrado limpio
             final_name = f"{custom_name}{ext}" if custom_name else file_basename
             new_path = os.path.join(BASE_DIR, f"in_{uid}_{final_name}")
             os.rename(filename, new_path)
@@ -175,20 +174,25 @@ async def download_link(url, custom_name, msg, uid):
         cleanup(uid)
         await msg.edit(f"❌ **Error:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado y Limpiado.**")
 
-# --- 📥 LÓGICA DE YTL ---
+# --- 📥 LÓGICA DE YTL ACTUALIZADA (ANTI-TIMEOUT) ---
 async def download_ytl(url, custom_name, msg, uid):
     cancel_flags.discard(uid)
     loop = asyncio.get_event_loop()
     try:
-        # Template temporal para evitar conflictos
         output_template = os.path.join(BASE_DIR, f"in_{uid}_temp.%(ext)s")
         ydl_opts = {
             'format': 'bestvideo+bestaudio/best',
             'outtmpl': output_template,
             'quiet': True,
             'logger': YTLProgressLogger(msg, uid, loop),
+            'retries': 10,
+            'fragment_retries': 10,
+            'socket_timeout': 30,
+            'noprogress': True,
+            'no_warnings': True,
+            'extractor_args': {'google_drive': {'confirm': ['t']}},
         }
-        await msg.edit(f"⏳ **YTL:** Iniciando descarga...")
+        await msg.edit(f"⏳ **YTL:** Iniciando descarga (Anti-Timeout activo)...")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
             temp_filename = ydl.prepare_filename(info)
@@ -202,7 +206,11 @@ async def download_ytl(url, custom_name, msg, uid):
         else: raise Exception("No se generó el archivo.")
     except Exception as e:
         cleanup(uid)
-        await msg.edit(f"❌ **Error YTL:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado y Limpiado.**")
+        err = str(e)
+        if "Read timed out" in err or "timeout" in err.lower():
+            await msg.edit("❌ **Error de Red:** El servidor de origen (Google Drive) tardó demasiado en responder. Reintenta ahora.")
+        else:
+            await msg.edit(f"❌ **Error YTL:** `{err}`" if "USER_ABORTED" not in err else "🛑 **Cancelado y Limpiado.**")
 
 # --- 🛠️ UTILIDAD PARA LANZAR MENÚ TRAS DESCARGA ---
 async def prepare_for_menu(file_path, msg, uid):
@@ -400,7 +408,7 @@ async def cb_handler(client, query):
         if uid in active_processes:
             try: active_processes[uid].terminate()
             except: pass
-        cleanup(uid) # LIMPIEZA INMEDIATA
+        cleanup(uid)
         await query.message.edit("🛑 **Proceso abortado y archivos borrados de inmediato.**")
 
     if changed:
