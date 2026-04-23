@@ -37,7 +37,7 @@ DEFAULT_SETTINGS = {
     'keep_format': True
 }
 
-# --- 📊 LOGGER PARA YT-DLP (BARRA DE PROGRESO) ---
+# --- 📊 LOGGER PARA YT-DLP ---
 class YTLProgressLogger:
     def __init__(self, msg, uid, loop):
         self.msg = msg
@@ -59,6 +59,7 @@ class YTLProgressLogger:
             asyncio.run_coroutine_threadsafe(self.update_ytl_ui(percent, msg), self.loop)
 
     async def update_ytl_ui(self, percent, raw_msg):
+        if self.uid in cancel_flags: return
         now = time.time()
         if (now - last_update_time.get(self.uid, 0)) < 12: return
         last_update_time[self.uid] = now
@@ -89,8 +90,9 @@ def get_sys_stats_raw():
     return f"⚙️ **CPU:** `{cpu}%` | 🧠 **RAM:** `{ram}%` | 💽 **Disco:** `{free // (1024**3)}GB`"
 
 def cleanup(uid):
+    """Borrado inmediato de archivos relacionados al usuario"""
     for f in os.listdir(BASE_DIR):
-        if str(uid) in f and any(x in f for x in ["in_", "out_", "thumb_"]):
+        if str(uid) in f:
             try: os.remove(os.path.join(BASE_DIR, f))
             except: pass
 
@@ -110,6 +112,7 @@ def generate_thumbnail(video_path, uid):
 
 # --- 📊 BARRA DE PROGRESO UNIVERSAL ---
 async def progress_bar(current, total, msg, uid, type_label):
+    if uid in cancel_flags: raise Exception("USER_ABORTED")
     now = time.time()
     if (now - last_update_time.get(uid, 0)) < 12: return
     last_update_time[uid] = now
@@ -120,7 +123,6 @@ async def progress_bar(current, total, msg, uid, type_label):
            f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
     try: await msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 CANCELAR", callback_data=f"abort_{uid}")]]))
     except: pass
-    if uid in cancel_flags: raise Exception("USER_ABORTED")
 
 # --- 📊 MONITOR ARIA2 ---
 async def aria2_monitor(gid, msg, uid):
@@ -130,6 +132,9 @@ async def aria2_monitor(gid, msg, uid):
             download = aria2.get_download(gid)
             if download.is_complete: return True
             if download.is_removed: return False
+            if uid in cancel_flags:
+                aria2.remove([download], force=True, files=True)
+                return False
             now = time.time()
             if (now - last_update_time.get(uid, 0)) > 12:
                 last_update_time[uid] = now
@@ -141,9 +146,6 @@ async def aria2_monitor(gid, msg, uid):
                        f"🧪 **SISTEMA**\n{get_sys_stats_raw()}")
                 try: await msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 CANCELAR", callback_data=f"abort_{uid}")]]))
                 except: pass
-            if uid in cancel_flags:
-                aria2.remove([download], force=True, files=True)
-                return False
             await asyncio.sleep(1)
         except: break
     return False
@@ -160,48 +162,47 @@ async def download_link(url, custom_name, msg, uid):
             download = aria2.get_download(gid)
             file_basename = os.path.basename(download.files[0].path)
             filename = os.path.join(BASE_DIR, file_basename)
-            if not os.path.exists(filename):
-                for root, _, files in os.walk(BASE_DIR):
-                    if file_basename in files:
-                        filename = os.path.join(root, file_basename)
-                        break
             ext = os.path.splitext(filename)[1] or ".mp4"
-            safe_name = re.sub(r'[\\/*?:"<>|]', "", custom_name) if custom_name else f"download_{int(time.time())}"
-            new_path = os.path.join(BASE_DIR, f"in_{uid}_{safe_name}{ext}")
+            # Renombrado limpio
+            final_name = f"{custom_name}{ext}" if custom_name else file_basename
+            new_path = os.path.join(BASE_DIR, f"in_{uid}_{final_name}")
             os.rename(filename, new_path)
             await prepare_for_menu(new_path, msg, uid)
         else:
-            await msg.edit("🛑 **Operación cancelada.**")
             cleanup(uid)
+            await msg.edit("🛑 **Proceso Cancelado y archivos borrados.**")
     except Exception as e:
-        await msg.edit(f"❌ **Error en Leech:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado.**")
         cleanup(uid)
+        await msg.edit(f"❌ **Error:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado y Limpiado.**")
 
 # --- 📥 LÓGICA DE YTL ---
 async def download_ytl(url, custom_name, msg, uid):
     cancel_flags.discard(uid)
     loop = asyncio.get_event_loop()
     try:
-        safe_name = re.sub(r'[\\/*?:"<>|]', "", custom_name) if custom_name else f"ytl_{int(time.time())}"
-        output_template = os.path.join(BASE_DIR, f"in_{uid}_{safe_name}.%(ext)s")
+        # Template temporal para evitar conflictos
+        output_template = os.path.join(BASE_DIR, f"in_{uid}_temp.%(ext)s")
         ydl_opts = {
             'format': 'bestvideo+bestaudio/best',
             'outtmpl': output_template,
             'quiet': True,
-            'no_warnings': True,
-            'nocheckcertificate': True,
-            'addheader': [('User-Agent', 'Mozilla/5.0')],
             'logger': YTLProgressLogger(msg, uid, loop),
         }
         await msg.edit(f"⏳ **YTL:** Iniciando descarga...")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
-            filename = ydl.prepare_filename(info)
-        if os.path.exists(filename): await prepare_for_menu(filename, msg, uid)
-        else: raise Exception("No se generó el archivo de salida.")
+            temp_filename = ydl.prepare_filename(info)
+        
+        if os.path.exists(temp_filename):
+            ext = os.path.splitext(temp_filename)[1] or ".mp4"
+            final_name = f"{custom_name}{ext}" if custom_name else os.path.basename(temp_filename).replace(f"in_{uid}_temp", "yt_video")
+            final_path = os.path.join(BASE_DIR, f"in_{uid}_{final_name}")
+            os.rename(temp_filename, final_path)
+            await prepare_for_menu(final_path, msg, uid)
+        else: raise Exception("No se generó el archivo.")
     except Exception as e:
-        await msg.edit(f"❌ **Error en YTL:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado.**")
         cleanup(uid)
+        await msg.edit(f"❌ **Error YTL:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado y Limpiado.**")
 
 # --- 🛠️ UTILIDAD PARA LANZAR MENÚ TRAS DESCARGA ---
 async def prepare_for_menu(file_path, msg, uid):
@@ -211,67 +212,65 @@ async def prepare_for_menu(file_path, msg, uid):
             self.document = None; self.chat = msg_obj.chat; self.from_user = msg_obj.from_user
             self.file_path = p
         async def download(self, **kwargs): return self.file_path
+    
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
-    user_settings[uid]['orig_msg'] = FakeMessage(file_path, os.path.basename(file_path), msg)
-    await msg.edit(f"✅ **Descarga Finalizada**\n\n📄 `{os.path.basename(file_path)}`", reply_markup=get_main_menu(uid))
+    filename = os.path.basename(file_path).replace(f"in_{uid}_", "")
+    user_settings[uid]['orig_msg'] = FakeMessage(file_path, filename, msg)
+    await msg.edit(f"✅ **Descarga Finalizada**\n\n📄 `{filename}`", reply_markup=get_main_menu(uid))
 
-# --- 📊 MONITOR FFMPEG (CADA 12 SEG) ---
+# --- 📊 MONITOR FFMPEG ---
 async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     active_processes[uid] = proc
-    start_time = time.time()
-    last_update = 0
+    start_time, last_update = time.time(), 0
     while True:
         line = await proc.stdout.readline()
         if not line: break
         text = line.decode("utf-8")
+        if uid in cancel_flags:
+            try: proc.terminate()
+            except: pass
+            raise Exception("USER_ABORTED")
         if "out_time_ms=" in text:
             try:
-                ms = int(text.split("=")[1])
-                current_time_sec = ms / 1000000
+                current_time_sec = int(text.split("=")[1]) / 1000000
                 now = time.time()
                 if duration > 0 and (now - last_update) > 12:
                     percentage = min((current_time_sec / duration) * 100, 100)
-                    speed_factor = current_time_sec / (now - start_time) if (now - start_time) > 0 else 0
-                    eta_sec = (duration - current_time_sec) / speed_factor if speed_factor > 0 else 0
-                    eta = time.strftime('%H:%M:%S', time.gmtime(eta_sec))
+                    speed = current_time_sec / (now - start_time) if (now - start_time) > 0 else 0
+                    eta = time.strftime('%H:%M:%S', time.gmtime((duration - current_time_sec) / speed)) if speed > 0 else "..."
                     bar = '█' * int(12 * percentage // 100) + '░' * (12 - int(12 * percentage // 100))
                     tmp = (f"⚙️ **{mode_label}**\n« {bar} »  **{percentage:.1f}%**\n\n"
-                           f"⚡ **PRESET:** `{settings['v_label']}` | 🚀 **V-ETA:** `{speed_factor:.2f}x`\n"
+                           f"⚡ **PRESET:** `{settings['v_label']}` | 🚀 **V-ETA:** `{speed:.2f}x`\n"
                            f"⏳ **RESTANTE:** `{eta}`\n\n🧪 **SISTEMA**\n{get_sys_stats_raw()}")
                     try: await msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 ABORTAR", callback_data=f"abort_{uid}")]]))
                     except: pass
                     last_update = now
             except: pass
-        if uid in cancel_flags:
-            try: proc.terminate()
-            except: pass
-            raise Exception("USER_ABORTED")
     await proc.wait()
 
 # --- ⚙️ PROCESAMIENTO ---
 async def process_logic(uid, msg, settings, mode):
     orig_msg = settings['orig_msg']
-    raw_name = getattr(orig_msg.video, 'file_name', None) or getattr(orig_msg.document, 'file_name', None) or "video.mp4"
+    raw_name = getattr(orig_msg.video, 'file_name', "video.mp4")
     ext_orig = os.path.splitext(raw_name)[1] or ".mp4"
     extension = ext_orig if settings.get('keep_format', True) else ".mp4"
-    input_path = getattr(orig_msg, 'file_path', os.path.join(BASE_DIR, f"in_{uid}_{int(time.time())}{ext_orig}"))
-    output_path = os.path.join(BASE_DIR, f"out_{uid}_{int(time.time())}{extension}")
+    
+    input_path = getattr(orig_msg, 'file_path', os.path.join(BASE_DIR, f"in_{uid}_{raw_name}"))
+    output_path = os.path.join(BASE_DIR, f"out_{uid}_{raw_name.replace(ext_orig, extension)}")
 
     try:
         if not os.path.exists(input_path):
-            last_update_time[uid] = 0
-            input_path = await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, uid, "DESCARGANDO DE TG"))
+            input_path = await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, uid, "DESCARGANDO"))
         
         duration = get_duration(input_path)
         if mode == "audio_only":
             cmd = ["ffmpeg", "-y", "-i", input_path, "-vn", "-c:a", str(settings['audio_codec']), "-b:a", "192k", "-progress", "pipe:1", output_path]
             label = "EXTRAER AUDIO"
         elif mode == "smart":
-            # --- COMPRESIÓN QUIRÚRGICA x265 ---
             v_bitrate = int((1900 * 1024 * 1024 * 8) / duration) - 128000 if duration > 0 else 2500000
             cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "libx265", "-b:v", str(v_bitrate), "-preset", "slower", "-c:a", "copy", "-progress", "pipe:1", output_path]
-            label = "💎 COMPRESIÓN SMART"
+            label = "💎 SMART x265"
         else:
             cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", f"scale=-2:{settings['res']}", "-c:v", "libx264", "-crf", str(settings['crf']), "-preset", str(settings['preset']), "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
             label = "COMPRIMIENDO"
@@ -279,21 +278,19 @@ async def process_logic(uid, msg, settings, mode):
         await ffmpeg_monitor(uid, msg, cmd, duration, settings, label)
 
         if os.path.exists(output_path):
-            last_update_time[uid] = 0
             await app.send_video(
-                chat_id=uid, video=output_path, 
-                duration=int(get_duration(output_path)), 
-                thumb=generate_thumbnail(output_path, uid), 
-                file_name=raw_name, supports_streaming=True,
-                caption=f"✅ **Procesado con Éxito**\n\n📄 `{raw_name}`",
-                progress=progress_bar, progress_args=(msg, uid, "SUBIENDO A TG")
+                chat_id=uid, video=output_path, duration=int(get_duration(output_path)), 
+                thumb=generate_thumbnail(output_path, uid), file_name=raw_name, 
+                supports_streaming=True, caption=f"✅ **Listo:** `{raw_name}`",
+                progress=progress_bar, progress_args=(msg, uid, "SUBIENDO")
             )
         try: await msg.delete()
         except: pass
     except Exception as e:
-        await msg.edit(f"❌ **Error:** `{e}`" if "USER_ABORTED" not in str(e) else "❌ **Cancelado.**")
+        await msg.edit(f"❌ **Error:** `{e}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado y archivos borrados.**")
     finally:
-        active_processes.pop(uid, None); cleanup(uid)
+        active_processes.pop(uid, None)
+        cleanup(uid)
 
 # --- MENÚS ---
 def get_config_summary(uid):
@@ -346,20 +343,20 @@ async def start_cmd(client, message):
 async def leech_handler(client, message):
     uid = message.from_user.id
     text = message.text.replace("/leech", "").strip()
-    if not text: return await message.reply("⚠️ Uso: `/leech [url] -n [nombre]`")
+    if not text: return await message.reply("⚠️ `/leech [url] -n [nombre]`")
     url = text.split(" -n ")[0].strip()
     name = text.split(" -n ")[1].strip() if " -n " in text else None
-    s_msg = await message.reply("⏳ **Aria2:** Analizando enlace...")
+    s_msg = await message.reply("⏳ **Aria2:** Iniciando...")
     await download_link(url, name, s_msg, uid)
 
 @app.on_message(filters.command("ytl") & filters.private)
 async def ytl_handler(client, message):
     uid = message.from_user.id
     text = message.text.replace("/ytl", "").strip()
-    if not text: return await message.reply("⚠️ Uso: `/ytl [url] -n [nombre]`")
+    if not text: return await message.reply("⚠️ `/ytl [url] -n [nombre]`")
     url = text.split(" -n ")[0].strip()
     name = text.split(" -n ")[1].strip() if " -n " in text else None
-    s_msg = await message.reply("⏳ **YTL:** Preparando descarga...")
+    s_msg = await message.reply("⏳ **YTL:** Preparando...")
     await download_ytl(url, name, s_msg, uid)
 
 @app.on_message((filters.video | filters.document) & filters.private)
@@ -367,7 +364,7 @@ async def handle_input(client, message):
     uid = message.from_user.id
     user_settings[uid] = DEFAULT_SETTINGS.copy()
     user_settings[uid]['orig_msg'] = message
-    await message.reply(f"🎬 **Archivo recibido**\n\n{get_config_summary(uid)}", reply_markup=get_main_menu(uid))
+    await message.reply(f"🎬 **Recibido**\n\n{get_config_summary(uid)}", reply_markup=get_main_menu(uid))
 
 @app.on_callback_query()
 async def cb_handler(client, query):
@@ -387,10 +384,8 @@ async def cb_handler(client, query):
         parts = data.split("_"); user_settings[uid]['audio_codec'], user_settings[uid]['a_label'] = parts[2], parts[3]; changed = True
     elif data == "mode_keep": user_settings[uid]['keep_format'] = True; changed = True
     elif data == "mode_mp4": user_settings[uid]['keep_format'] = False; changed = True
-    elif data == "menu_settings":
-        await query.message.edit(get_config_summary(uid), reply_markup=get_settings_menu(uid))
-    elif data == "menu_main":
-        await query.message.edit(get_config_summary(uid), reply_markup=get_main_menu(uid))
+    elif data == "menu_settings": await query.message.edit(get_config_summary(uid), reply_markup=get_settings_menu(uid))
+    elif data == "menu_main": await query.message.edit(get_config_summary(uid), reply_markup=get_main_menu(uid))
     elif data == "run_smart":
         cancel_flags.discard(uid); await processing_queue.put((uid, query.message, user_settings[uid].copy(), "smart"))
         await query.message.edit("⏳ **En cola: Smart x265...**")
@@ -405,11 +400,11 @@ async def cb_handler(client, query):
         if uid in active_processes:
             try: active_processes[uid].terminate()
             except: pass
-        await query.message.edit("🛑 **Abortando proceso...**")
+        cleanup(uid) # LIMPIEZA INMEDIATA
+        await query.message.edit("🛑 **Proceso abortado y archivos borrados de inmediato.**")
 
     if changed:
         try:
-            # Detectar si estamos en el menú de ajustes o el principal para refrescar correctamente
             is_in_settings = query.message.reply_markup.inline_keyboard[0][0].text == "── CALIDAD ──"
             markup = get_settings_menu(uid) if is_in_settings else get_main_menu(uid)
             await query.message.edit(get_config_summary(uid), reply_markup=markup)
