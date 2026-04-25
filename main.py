@@ -32,7 +32,7 @@ DEFAULT_SETTINGS = {
     'res': '720',
     'q_label': 'Estándar', 
     'v_label': 'Medio',
-    'video_codec': 'libx264', # Nuevo: Códec por defecto
+    'video_codec': 'libx264', 
     'vc_label': 'x264',
     'audio_codec': 'aac', 
     'a_label': 'AAC',
@@ -252,13 +252,11 @@ async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
             except: pass
     await proc.wait()
 
-# --- ⚙️ PROCESAMIENTO ---
+# --- ⚙️ PROCESAMIENTO ACTUALIZADO ---
 async def process_logic(uid, msg, settings, mode):
     orig_msg = settings['orig_msg']
     raw_name = getattr(orig_msg.video, 'file_name', "video.mp4")
     ext_orig = os.path.splitext(raw_name)[1] or ".mp4"
-    
-    # Nuevo: Lógica de extensión forzada o conservada
     extension = ".mp4" if not settings.get('keep_format', True) else ext_orig
     
     input_path = getattr(orig_msg, 'file_path', os.path.join(BASE_DIR, f"in_{uid}_{raw_name}"))
@@ -270,19 +268,33 @@ async def process_logic(uid, msg, settings, mode):
         
         duration = get_duration(input_path)
         
+        # --- MEJORAS DE COMPATIBILIDAD APLICADAS ---
+        
         if mode == "audio_only":
-            # Extraer audio respetando el códec de audio seleccionado
             a_ext = ".mp3" if settings['audio_codec'] == "libmp3lame" else ".m4a"
             output_path = os.path.join(BASE_DIR, f"out_{uid}_audio{a_ext}")
             cmd = ["ffmpeg", "-y", "-i", input_path, "-vn", "-c:a", str(settings['audio_codec']), "-b:a", "192k", "-progress", "pipe:1", output_path]
             label = "EXTRAER AUDIO"
         elif mode == "smart":
             v_bitrate = int((1900 * 1024 * 1024 * 8) / duration) - 128000 if duration > 0 else 2500000
-            cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "libx265", "-b:v", str(v_bitrate), "-preset", "slower", "-c:a", "copy", "-progress", "pipe:1", output_path]
+            # Mejorado: Agregado tag hvc1 y pix_fmt yuv420p para x265
+            cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "libx265", "-b:v", str(v_bitrate), 
+                   "-preset", "slower", "-pix_fmt", "yuv420p", "-tag:v", "hvc1", 
+                   "-c:a", "copy", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
             label = "💎 SMART x265"
         else:
-            # Compresión usando el códec de video seleccionado (x264 o x265)
-            cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", f"scale=-2:{settings['res']}", "-c:v", str(settings['video_codec']), "-crf", str(settings['crf']), "-preset", str(settings['preset']), "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
+            # Mejorado: Agregado Profile High, Level 4.1 y pix_fmt yuv420p para x264/x265
+            v_codec = str(settings['video_codec'])
+            cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", f"scale=-2:{settings['res']}", 
+                   "-c:v", v_codec, "-crf", str(settings['crf']), "-preset", str(settings['preset'])]
+            
+            # Parámetros específicos según el códec elegido
+            if v_codec == "libx264":
+                cmd += ["-profile:v", "high", "-level:v", "4.1"]
+            elif v_codec == "libx265":
+                cmd += ["-tag:v", "hvc1"]
+                
+            cmd += ["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
             label = f"COMPRIMIENDO ({settings['vc_label']})"
 
         await ffmpeg_monitor(uid, msg, cmd, duration, settings, label)
@@ -389,7 +401,7 @@ async def cb_handler(client, query):
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
     
     changed = False
-    if data.startswith("set_vc_"): # Selector de Códec Video
+    if data.startswith("set_vc_"): 
         parts = data.split("_"); user_settings[uid]['video_codec'], user_settings[uid]['vc_label'] = parts[2], parts[3]; changed = True
     elif data.startswith("set_q_"):
         val = data.split("_")[2]
