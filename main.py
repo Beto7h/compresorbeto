@@ -32,6 +32,8 @@ DEFAULT_SETTINGS = {
     'res': '720',
     'q_label': 'Estándar', 
     'v_label': 'Medio',
+    'video_codec': 'libx264', # Nuevo: Códec por defecto
+    'vc_label': 'x264',
     'audio_codec': 'aac', 
     'a_label': 'AAC',
     'keep_format': True
@@ -90,7 +92,6 @@ def get_sys_stats_raw():
     return f"⚙️ **CPU:** `{cpu}%` | 🧠 **RAM:** `{ram}%` | 💽 **Disco:** `{free // (1024**3)}GB`"
 
 def cleanup(uid):
-    """Borrado inmediato de archivos relacionados al usuario"""
     for f in os.listdir(BASE_DIR):
         if str(uid) in f:
             try: os.remove(os.path.join(BASE_DIR, f))
@@ -110,7 +111,6 @@ def generate_thumbnail(video_path, uid):
         return thumb_path if os.path.exists(thumb_path) else None
     except: return None
 
-# --- 📊 BARRA DE PROGRESO UNIVERSAL ---
 async def progress_bar(current, total, msg, uid, type_label):
     if uid in cancel_flags: raise Exception("USER_ABORTED")
     now = time.time()
@@ -124,7 +124,6 @@ async def progress_bar(current, total, msg, uid, type_label):
     try: await msg.edit(tmp, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 CANCELAR", callback_data=f"abort_{uid}")]]))
     except: pass
 
-# --- 📊 MONITOR ARIA2 ---
 async def aria2_monitor(gid, msg, uid):
     last_update_time[uid] = 0
     while True:
@@ -150,7 +149,6 @@ async def aria2_monitor(gid, msg, uid):
         except: break
     return False
 
-# --- 📥 LÓGICA DE LEECH ---
 async def download_link(url, custom_name, msg, uid):
     cancel_flags.discard(uid)
     try:
@@ -174,7 +172,6 @@ async def download_link(url, custom_name, msg, uid):
         cleanup(uid)
         await msg.edit(f"❌ **Error:** `{str(e)}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado y Limpiado.**")
 
-# --- 📥 LÓGICA DE YTL ACTUALIZADA (ANTI-TIMEOUT) ---
 async def download_ytl(url, custom_name, msg, uid):
     cancel_flags.discard(uid)
     loop = asyncio.get_event_loop()
@@ -212,7 +209,6 @@ async def download_ytl(url, custom_name, msg, uid):
         else:
             await msg.edit(f"❌ **Error YTL:** `{err}`" if "USER_ABORTED" not in err else "🛑 **Cancelado y Limpiado.**")
 
-# --- 🛠️ UTILIDAD PARA LANZAR MENÚ TRAS DESCARGA ---
 async def prepare_for_menu(file_path, msg, uid):
     class FakeMessage:
         def __init__(self, p, n, msg_obj):
@@ -226,7 +222,6 @@ async def prepare_for_menu(file_path, msg, uid):
     user_settings[uid]['orig_msg'] = FakeMessage(file_path, filename, msg)
     await msg.edit(f"✅ **Descarga Finalizada**\n\n📄 `{filename}`", reply_markup=get_main_menu(uid))
 
-# --- 📊 MONITOR FFMPEG ---
 async def ffmpeg_monitor(uid, msg, cmd, duration, settings, mode_label):
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     active_processes[uid] = proc
@@ -262,7 +257,9 @@ async def process_logic(uid, msg, settings, mode):
     orig_msg = settings['orig_msg']
     raw_name = getattr(orig_msg.video, 'file_name', "video.mp4")
     ext_orig = os.path.splitext(raw_name)[1] or ".mp4"
-    extension = ext_orig if settings.get('keep_format', True) else ".mp4"
+    
+    # Nuevo: Lógica de extensión forzada o conservada
+    extension = ".mp4" if not settings.get('keep_format', True) else ext_orig
     
     input_path = getattr(orig_msg, 'file_path', os.path.join(BASE_DIR, f"in_{uid}_{raw_name}"))
     output_path = os.path.join(BASE_DIR, f"out_{uid}_{raw_name.replace(ext_orig, extension)}")
@@ -272,7 +269,11 @@ async def process_logic(uid, msg, settings, mode):
             input_path = await orig_msg.download(file_name=input_path, progress=progress_bar, progress_args=(msg, uid, "DESCARGANDO"))
         
         duration = get_duration(input_path)
+        
         if mode == "audio_only":
+            # Extraer audio respetando el códec de audio seleccionado
+            a_ext = ".mp3" if settings['audio_codec'] == "libmp3lame" else ".m4a"
+            output_path = os.path.join(BASE_DIR, f"out_{uid}_audio{a_ext}")
             cmd = ["ffmpeg", "-y", "-i", input_path, "-vn", "-c:a", str(settings['audio_codec']), "-b:a", "192k", "-progress", "pipe:1", output_path]
             label = "EXTRAER AUDIO"
         elif mode == "smart":
@@ -280,22 +281,26 @@ async def process_logic(uid, msg, settings, mode):
             cmd = ["ffmpeg", "-y", "-i", input_path, "-c:v", "libx265", "-b:v", str(v_bitrate), "-preset", "slower", "-c:a", "copy", "-progress", "pipe:1", output_path]
             label = "💎 SMART x265"
         else:
-            cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", f"scale=-2:{settings['res']}", "-c:v", "libx264", "-crf", str(settings['crf']), "-preset", str(settings['preset']), "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
-            label = "COMPRIMIENDO"
+            # Compresión usando el códec de video seleccionado (x264 o x265)
+            cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", f"scale=-2:{settings['res']}", "-c:v", str(settings['video_codec']), "-crf", str(settings['crf']), "-preset", str(settings['preset']), "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-progress", "pipe:1", output_path]
+            label = f"COMPRIMIENDO ({settings['vc_label']})"
 
         await ffmpeg_monitor(uid, msg, cmd, duration, settings, label)
 
         if os.path.exists(output_path):
-            await app.send_video(
-                chat_id=uid, video=output_path, duration=int(get_duration(output_path)), 
-                thumb=generate_thumbnail(output_path, uid), file_name=raw_name, 
-                supports_streaming=True, caption=f"✅ **Listo:** `{raw_name}`",
-                progress=progress_bar, progress_args=(msg, uid, "SUBIENDO")
-            )
+            if mode == "audio_only":
+                await app.send_audio(chat_id=uid, audio=output_path, caption=f"🎵 **Audio Extraído**")
+            else:
+                await app.send_video(
+                    chat_id=uid, video=output_path, duration=int(get_duration(output_path)), 
+                    thumb=generate_thumbnail(output_path, uid), file_name=os.path.basename(output_path), 
+                    supports_streaming=True, caption=f"✅ **Listo:** `{os.path.basename(output_path)}`",
+                    progress=progress_bar, progress_args=(msg, uid, "SUBIENDO")
+                )
         try: await msg.delete()
         except: pass
     except Exception as e:
-        await msg.edit(f"❌ **Error:** `{e}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado y archivos borrados.**")
+        await msg.edit(f"❌ **Error:** `{e}`" if "USER_ABORTED" not in str(e) else "🛑 **Cancelado y Limpiado.**")
     finally:
         active_processes.pop(uid, None)
         cleanup(uid)
@@ -304,8 +309,9 @@ async def process_logic(uid, msg, settings, mode):
 def get_config_summary(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
     return (f"📝 **CONFIGURACIÓN ACTUAL:**\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"💎 **Calidad:** `{s['q_label']}` | 📏 **Res:** `{s['res']}p`\n"
-            f"⚡ **Preset:** `{s['v_label']}` | 🎵 **Audio:** `{s['a_label']}`\n━━━━━━━━━━━━━━━━━━━━")
+            f"🎥 **Códec:** `{s['vc_label']}` | 💎 **Calidad:** `{s['q_label']}`\n"
+            f"📏 **Res:** `{s['res']}p` | ⚡ **Preset:** `{s['v_label']}`\n"
+            f"🎵 **Audio:** `{s['a_label']}` | 📁 **Forzar:** `{'Original' if s['keep_format'] else 'MP4'}`\n━━━━━━━━━━━━━━━━━━━━")
 
 def get_main_menu(uid):
     s = user_settings.get(uid, DEFAULT_SETTINGS)
@@ -313,7 +319,9 @@ def get_main_menu(uid):
     force_v = "✅ " if not s.get('keep_format', True) else ""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎞️ AJUSTES AVANZADOS", callback_data="menu_settings")],
-        [InlineKeyboardButton("💎 MODO SMART (<2GB)", callback_data="run_smart")],
+        [InlineKeyboardButton(f"{'✅ ' if s['vc_label']=='x264' else ''}CÓDEC x264", callback_data="set_vc_libx264_x264"),
+         InlineKeyboardButton(f"{'✅ ' if s['vc_label']=='x265' else ''}CÓDEC x265", callback_data="set_vc_libx265_x265")],
+        [InlineKeyboardButton("💎 MODO SMART (x265)", callback_data="run_smart")],
         [InlineKeyboardButton("🚀 INICIAR COMPRESIÓN", callback_data="run_comp")],
         [InlineKeyboardButton(f"{'✅ ' if s.get('a_label')=='MP3' else ''}MP3", callback_data="set_aud_libmp3lame_MP3"),
          InlineKeyboardButton(f"{'✅ ' if s.get('a_label')=='AAC' else ''}AAC", callback_data="set_aud_aac_AAC")],
@@ -381,7 +389,9 @@ async def cb_handler(client, query):
     if uid not in user_settings: user_settings[uid] = DEFAULT_SETTINGS.copy()
     
     changed = False
-    if data.startswith("set_q_"):
+    if data.startswith("set_vc_"): # Selector de Códec Video
+        parts = data.split("_"); user_settings[uid]['video_codec'], user_settings[uid]['vc_label'] = parts[2], parts[3]; changed = True
+    elif data.startswith("set_q_"):
         val = data.split("_")[2]
         user_settings[uid]['crf'] = val
         user_settings[uid]['q_label'] = {"30":"Baja", "24":"Estándar", "18":"Súper"}[val]; changed = True
